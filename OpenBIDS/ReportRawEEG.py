@@ -26,6 +26,7 @@ def compare_behavioral(
     evs_bids,
     label_bids,
     *,
+    bids_is_eeg=True,
     options=None,
     rtol=RTOL,
     atol=ATOL,
@@ -104,45 +105,46 @@ def compare_behavioral(
     session = session_cml if session_cml is not None else session_bids
 
     # ---------- required cols ----------
-    required_cml = {"eegoffset", "mstime", "type"}
-    required_bids = {"sample", "onset", "trial_type"}
+    if bids_is_eeg:
+        required_cml = {"eegoffset", "mstime", "type"}
+        required_bids = {"sample", "onset", "trial_type"}
 
-    missing_cml = required_cml - set(evs_cml.columns)
-    missing_bids = required_bids - set(evs_bids.columns)
-    if missing_cml:
-        raise ValueError(f"{label_cml}: missing required columns: {sorted(missing_cml)}")
-    if missing_bids:
-        raise ValueError(f"{label_bids}: missing required columns: {sorted(missing_bids)}")
+        missing_cml = required_cml - set(evs_cml.columns)
+        missing_bids = required_bids - set(evs_bids.columns)
+        if missing_cml:
+            raise ValueError(f"{label_cml}: missing required columns: {sorted(missing_cml)}")
+        if missing_bids:
+            raise ValueError(f"{label_bids}: missing required columns: {sorted(missing_bids)}")
 
-    # ---------- normalize CML to BIDS-like names ----------
-    cml2 = evs_cml.copy()
-    bids2 = evs_bids.copy()
+        # ---------- normalize CML to BIDS-like names ----------
+        cml2 = evs_cml.copy()
+        bids2 = evs_bids.copy()
 
-    # CML sentinel missing -> NaN (and common empty-string missing)
-    cml2 = cml2.replace({-999: np.nan, -999.0: np.nan, "-999": np.nan, "": np.nan})
+        # CML sentinel missing -> NaN (and common empty-string missing)
+        cml2 = cml2.replace({-999: np.nan, -999.0: np.nan, "-999": np.nan, "": np.nan})
 
-    # rename to match BIDS schema for the 3 key cols
-    cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
+        # rename to match BIDS schema for the 3 key cols
+        cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
 
-    # ensure mapped cols numeric/string comparable
-    cml2["sample"] = pd.to_numeric(cml2["sample"], errors="raise")
-    bids2["sample"] = pd.to_numeric(bids2["sample"], errors="raise")
-    cml2["trial_type"] = cml2["trial_type"].astype(str)
-    bids2["trial_type"] = bids2["trial_type"].astype(str)
+        # ensure mapped cols numeric/string comparable
+        cml2["sample"] = pd.to_numeric(cml2["sample"], errors="raise")
+        bids2["sample"] = pd.to_numeric(bids2["sample"], errors="raise")
+        cml2["trial_type"] = cml2["trial_type"].astype(str)
+        bids2["trial_type"] = bids2["trial_type"].astype(str)
 
-    # ---- onset construction (NEW) ----
-    # Convert CML onset (ms) -> seconds; BIDS onset assumed seconds
-    cml_onset_s = pd.to_numeric(evs_cml["mstime"], errors="raise") / 1000.0
-    bids_onset_s = pd.to_numeric(bids2["onset"], errors="raise")
+        # ---- onset construction (NEW) ----
+        # Convert CML onset (ms) -> seconds; BIDS onset assumed seconds
+        cml_onset_s = pd.to_numeric(evs_cml["mstime"], errors="raise") / 1000.0
+        bids_onset_s = pd.to_numeric(bids2["onset"], errors="raise")
 
-    if "compare_onset_as_diff" in options_set:
-        # Compare inter-event intervals
-        cml2["onset"] = cml_onset_s.diff()
-        bids2["onset"] = bids_onset_s.diff()
-    else:
-        # Compare absolute onset (CML shifted to start at 0)
-        cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
-        bids2["onset"] = bids_onset_s
+        if "compare_onset_as_diff" in options_set:
+            # Compare inter-event intervals
+            cml2["onset"] = cml_onset_s.diff()
+            bids2["onset"] = bids_onset_s.diff()
+        else:
+            # Compare absolute onset (CML shifted to start at 0)
+            cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
+            bids2["onset"] = bids_onset_s
 
     # ---------- choose columns to compare (ALL shared columns) ----------
     shared_cols = sorted((set(cml2.columns) & set(bids2.columns)) - drop_cols)
@@ -981,3 +983,46 @@ def compare_eeg_sources(
         "df_time": df_stats_time,
         # "eegs_std": eegs_std,
     }
+
+
+### PLOTTING
+def plot_comp_results(df_results, col_tgt, col_std=None, col_label=None)
+    # plot mean and std difference
+    comparisons = df_results['comparison'].unique()
+    subjects = df_results['subject'].unique()
+    experiments = df_results['experiment'].unique()
+
+    for experiment in experiments:
+        fig, axes = plt.subplots(1, len(comparisons), figsize=(6 * len(comparisons), 5), sharex=True)
+        if len(comparisons) == 1: axes = [axes]
+
+        for i, comp in enumerate(comparisons):
+            ax = axes[i]
+            comp_df = df_time_all[(df_time_all['comparison'] == comp) & (df_time_all['experiment'] == experiment)]
+
+            for subj in subjects:
+                subj_df = comp_df[comp_df['subject'] == subj].sort_values('session')
+                if subj_df.empty: continue
+
+                # Plot mean line
+                line, = ax.plot(subj_df['session'], subj_df[col_tgt], marker='o', label=subj)
+
+                # Add shaded Std region
+                if col_std is not None:
+                    ax.fill_between(
+                        subj_df['session'], 
+                        subj_df[col_tgt] - subj_df[col_std],
+                        subj_df[col_tgt] + subj_df[col_std],
+                        color=line.get_color(), 
+                        alpha=0.15
+                    )
+
+            ax.set_title(f"{experiment} | {comp}")
+            ax.set_xlabel('Session')
+            y_label = col_label if col_label is not None else col_tgt
+            y_label += " ($\pm$ Std)" if col_std is not None else ""
+            if i == 0: ax.set_ylabel(y_label)
+            ax.legend(title='Subject')
+
+        plt.tight_layout()
+        plt.show()
