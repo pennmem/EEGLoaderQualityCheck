@@ -1,6 +1,9 @@
 import numpy as np
 import xarray as xr
 import pandas as pd
+# import matplotlib as plt
+import matplotlib.pyplot as plt
+
 
 
 
@@ -140,11 +143,15 @@ def compare_behavioral(
         if "compare_onset_as_diff" in options_set:
             # Compare inter-event intervals
             cml2["onset"] = cml_onset_s.diff()
+            print(cml2["onset"])
             bids2["onset"] = bids_onset_s.diff()
+            print(bids2["onset"])
         else:
             # Compare absolute onset (CML shifted to start at 0)
             cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
+            print(cml2["onset"])
             bids2["onset"] = bids_onset_s
+            print(bids2["onset"])
 
     # ---------- choose columns to compare (ALL shared columns) ----------
     shared_cols = sorted((set(cml2.columns) & set(bids2.columns)) - drop_cols)
@@ -181,7 +188,7 @@ def compare_behavioral(
     col_rows = []
     differing_cols = []
     mismatch_examples = []
-
+    print(shared_cols)
     for col in shared_cols:
         a = cml_aligned[col]
         b = bids_aligned[col]
@@ -986,7 +993,7 @@ def compare_eeg_sources(
 
 
 ### PLOTTING
-def plot_comp_results(df_results, col_tgt, col_std=None, col_label=None)
+def plot_comp_results(df_results, col_tgt, col_std=None, col_label=None):
     # plot mean and std difference
     comparisons = df_results['comparison'].unique()
     subjects = df_results['subject'].unique()
@@ -998,7 +1005,7 @@ def plot_comp_results(df_results, col_tgt, col_std=None, col_label=None)
 
         for i, comp in enumerate(comparisons):
             ax = axes[i]
-            comp_df = df_time_all[(df_time_all['comparison'] == comp) & (df_time_all['experiment'] == experiment)]
+            comp_df = df_results[(df_results['comparison'] == comp) & (df_results['experiment'] == experiment)]
 
             for subj in subjects:
                 subj_df = comp_df[comp_df['subject'] == subj].sort_values('session')
