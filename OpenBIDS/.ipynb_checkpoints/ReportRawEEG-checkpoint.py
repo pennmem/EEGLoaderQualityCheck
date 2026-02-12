@@ -21,6 +21,8 @@ pd.options.display.max_rows = 100
 pd.options.display.max_columns = 50
 import mne
 from mne_bids import BIDSPath, read_raw_bids
+from typing import Any, Dict, Iterable, Optional, Sequence, Set, Tuple, Union
+from pathlib import Path
 
 
 # ----------------------------
@@ -35,95 +37,77 @@ MAX_ELEMENTS_FOR_FULL_PRINT = 50_000
 PRINT_SLICE = True
 SLICE_CFG = {"event": 0, "channel": slice(0, 5), "time": slice(0, 20)}
 
-### Compare behavioral
-import numpy as np
-import pandas as pd
+##################################################
 
-def compare_behavioral(
-    evs_cml,
-    label_cml,
-    evs_bids,
-    label_bids,
+# Comparing Behavioral Data
+
+##################################################
+
+
+def prep_cml_bids_events(
+    evs_cml: pd.DataFrame,
+    evs_bids: pd.DataFrame,
     *,
-    bids_is_eeg=True,
-    options=None,
-    rtol=RTOL,
-    atol=ATOL,
-    max_mismatches=20,
-    drop_cols=(),
-):
+    evs_types: Optional[Sequence[str]] = None,
+    bids_is_eeg: bool = True,
+    options: Optional[Iterable[str]] = None,
+    drop_cols: Union[Sequence[str], set, tuple] = (),
+    # metadata override (otherwise inferred)
+    subject: Optional[str] = None,
+    experiment: Optional[str] = None,
+    session: Optional[Union[str, int]] = None,
+) -> Dict[str, Any]:
     """
-    Compare CML vs BIDS behavioral/event tables allowing for known column name/definition differences:
-      - eegoffset -> sample
-      - mstime -> onset  (CML ms -> seconds)
-      - type -> trial_type
+    Prepare CML + BIDS events into *aligned-schema* DataFrames that can be
+    compared with `compare_shared_columns`.
 
-    Then compares ALL other shared columns too.
+    Mirrors the normalization logic used inside `compare_behavioral`:
+      - CML: eegoffset -> sample
+             mstime    -> onset   (ms -> seconds)
+             type      -> trial_type
+      - BIDS: assumed already has sample/onset/trial_type
+      - onset mode:
+          * if "compare_onset_as_diff" in options: onset := diff(onset)
+          * else: CML onset shifted to start at 0; BIDS onset unchanged
 
-    New option:
-      - "compare_onset_as_diff" : compare onset as diff() in both sources (inter-event intervals)
-                                 else compare absolute onset (CML shifted to start at 0; BIDS as-is)
+    Also:
+      - Filters both tables to the requested event types (evs_types)
+        * CML uses original "type" values
+        * BIDS uses "trial_type"
+      - Replaces CML sentinel missing values (-999, "", etc.) with NaN
+      - Adds subject/experiment/session columns to BOTH outputs (for downstream
+        compare_shared_columns to propagate them)
 
-    Other Options:
-      - "align_by_index"              : don't sort; compare row order as-is
-      - "allow_length_mismatch"       : compare only min(n_cml, n_bids)
-      - "tolerant_numeric"            : numeric cols compared with isclose(rtol/atol) (default ON)
-      - "print_behavior_summary"      : print 1-row summary
-      - "print_behavior_col_summary"  : print per-column mismatch counts
-      - "print_behavior_mismatches"   : print example mismatching cells (long format)
-      - "return_aligned"              : return aligned comparison tables
-      - "return_col_summary"          : return per-column summary df
-      - "return_mismatches"           : return mismatch df (example cells)
+    Returns:
+      dict with keys:
+        - evs_cml_prepped
+        - evs_bids_prepped
+        - subject, experiment, session
+        - evs_types_used
     """
-    options_set = set(options or ())
-    tolerant_numeric = ("tolerant_numeric" in options_set) or ("tolerant_onset" in options_set)  # backward compat
+    options_set: Set[str] = set(options or ())
     drop_cols = set(drop_cols or ())
 
     # ---------- helpers ----------
-    def _one_unique(df, col, label):
+    def _one_unique(df: pd.DataFrame, col: str) -> Optional[Any]:
         if col not in df.columns:
             return None
         vals = df[col].dropna().unique()
         if len(vals) == 0:
             return None
         if len(vals) != 1:
-            raise ValueError(f"{label}: column '{col}' has {len(vals)} unique values: {vals[:10]}")
+            return None
         return vals[0]
 
-    def _is_numeric_series(s: pd.Series) -> bool:
-        return pd.api.types.is_numeric_dtype(s)
+    # infer metadata if not provided
+    if subject is None:
+        subject = _one_unique(evs_cml, "subject") or _one_unique(evs_bids, "subject")
+    if experiment is None:
+        experiment = _one_unique(evs_cml, "experiment") or _one_unique(evs_bids, "experiment")
+    if session is None:
+        session = _one_unique(evs_cml, "session") or _one_unique(evs_bids, "session")
 
-    def _nan_safe_equal(a: pd.Series, b: pd.Series) -> np.ndarray:
-        a = a.to_numpy()
-        b = b.to_numpy()
-        both_nan = pd.isna(a) & pd.isna(b)
-        return (a == b) | both_nan
-
-    def _nan_safe_isclose(a: pd.Series, b: pd.Series, *, rtol_use, atol_use) -> np.ndarray:
-        a = pd.to_numeric(a, errors="coerce").to_numpy()
-        b = pd.to_numeric(b, errors="coerce").to_numpy()
-        return np.isclose(a, b, rtol=rtol_use, atol=atol_use, equal_nan=True)
-
-    # ---------- subject/experiment/session checks ----------
-    subject_cml = _one_unique(evs_cml, "subject", label_cml)
-    subject_bids = _one_unique(evs_bids, "subject", label_bids)
-    experiment_cml = _one_unique(evs_cml, "experiment", label_cml)
-    experiment_bids = _one_unique(evs_bids, "experiment", label_bids)
-    session_cml = _one_unique(evs_cml, "session", label_cml)
-    session_bids = _one_unique(evs_bids, "session", label_bids)
-
-    if subject_cml is not None and subject_bids is not None and subject_cml != subject_bids:
-        raise ValueError(f"Subjects differ: {label_cml}={subject_cml} vs {label_bids}={subject_bids}")
-    if experiment_cml is not None and experiment_bids is not None and experiment_cml != experiment_bids:
-        raise ValueError(f"Experiments differ: {label_cml}={experiment_cml} vs {label_bids}={experiment_bids}")
-    if session_cml is not None and session_bids is not None and session_cml != session_bids:
-        raise ValueError(f"Sessions differ: {label_cml}={session_cml} vs {label_bids}={session_bids}")
-
-    subject = subject_cml if subject_cml is not None else subject_bids
-    experiment = experiment_cml if experiment_cml is not None else experiment_bids
-    session = session_cml if session_cml is not None else session_bids
-
-    # ---------- required cols ----------
+    # ---------- required cols check ----------
     if bids_is_eeg:
         required_cml = {"eegoffset", "mstime", "type"}
         required_bids = {"sample", "onset", "trial_type"}
@@ -131,191 +115,565 @@ def compare_behavioral(
         missing_cml = required_cml - set(evs_cml.columns)
         missing_bids = required_bids - set(evs_bids.columns)
         if missing_cml:
-            raise ValueError(f"{label_cml}: missing required columns: {sorted(missing_cml)}")
+            raise ValueError(f"CML: missing required columns: {sorted(missing_cml)}")
         if missing_bids:
-            raise ValueError(f"{label_bids}: missing required columns: {sorted(missing_bids)}")
+            raise ValueError(f"BIDS: missing required columns: {sorted(missing_bids)}")
 
-        # ---------- normalize CML to BIDS-like names ----------
-        cml2 = evs_cml.copy()
-        bids2 = evs_bids.copy()
-
-        # CML sentinel missing -> NaN (and common empty-string missing)
-        cml2 = cml2.replace({-999: np.nan, -999.0: np.nan, "-999": np.nan, "": np.nan})
-
-        # rename to match BIDS schema for the 3 key cols
-        cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
-
-        # ensure mapped cols numeric/string comparable
-        cml2["sample"] = pd.to_numeric(cml2["sample"], errors="raise")
-        bids2["sample"] = pd.to_numeric(bids2["sample"], errors="raise")
-        cml2["trial_type"] = cml2["trial_type"].astype(str)
-        bids2["trial_type"] = bids2["trial_type"].astype(str)
-
-        # ---- onset construction (NEW) ----
-        # Convert CML onset (ms) -> seconds; BIDS onset assumed seconds
-        cml_onset_s = pd.to_numeric(evs_cml["mstime"], errors="raise") / 1000.0
-        bids_onset_s = pd.to_numeric(bids2["onset"], errors="raise")
-
-        if "compare_onset_as_diff" in options_set:
-            # Compare inter-event intervals
-            cml2["onset"] = cml_onset_s.diff()
-            print(cml2["onset"])
-            bids2["onset"] = bids_onset_s.diff()
-            print(bids2["onset"])
-        else:
-            # Compare absolute onset (CML shifted to start at 0)
-            cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
-            print(cml2["onset"])
-            bids2["onset"] = bids_onset_s
-            print(bids2["onset"])
-
-    # ---------- choose columns to compare (ALL shared columns) ----------
-    shared_cols = sorted((set(cml2.columns) & set(bids2.columns)) - drop_cols)
-
-    only_cml = sorted(set(cml2.columns) - set(bids2.columns) - drop_cols)
-    only_bids = sorted(set(bids2.columns) - set(cml2.columns) - drop_cols)
-
-    # ---------- align rows ----------
-    if "align_by_index" in options_set:
-        cml_aligned = cml2[shared_cols].reset_index(drop=True)
-        bids_aligned = bids2[shared_cols].reset_index(drop=True)
+    # ---------- event-type filtering ----------
+    if evs_types is None:
+        # default: use all types present in CML (original 'type')
+        evs_types_used = set(evs_cml["type"].dropna().astype(str).unique())
     else:
-        # robust tie-break for duplicate samples
-        tie_keys = [k for k in ["sample", "trial_type"] if k in shared_cols]
-        # only use onset as a tie-break when NOT comparing diff(onset)
-        if "compare_onset_as_diff" not in options_set and "onset" in shared_cols:
-            tie_keys.append("onset")
+        evs_types_used = set(map(str, evs_types))
 
-        cml_aligned = cml2[shared_cols].sort_values(tie_keys, kind="mergesort").reset_index(drop=True)
-        bids_aligned = bids2[shared_cols].sort_values(tie_keys, kind="mergesort").reset_index(drop=True)
+    evs_cml_f = evs_cml[evs_cml["type"].astype(str).isin(evs_types_used)].copy()
+    evs_bids_f = evs_bids[evs_bids["trial_type"].astype(str).isin(evs_types_used)].copy()
 
-    n_cml = len(cml_aligned)
-    n_bids = len(bids_aligned)
-    length_mismatch = (n_cml != n_bids)
+    # ---------- normalize CML to BIDS-like names ----------
+    cml2 = evs_cml_f.replace({-999: np.nan, -999.0: np.nan, "-999": np.nan, "": np.nan}).copy()
+    bids2 = evs_bids_f.copy()
 
-    if length_mismatch and ("allow_length_mismatch" not in options_set):
-        raise AssertionError(f"Event count mismatch: {label_cml}={n_cml} vs {label_bids}={n_bids}")
+    cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
 
-    n = min(n_cml, n_bids)
-    cml_aligned = cml_aligned.iloc[:n].reset_index(drop=True)
-    bids_aligned = bids_aligned.iloc[:n].reset_index(drop=True)
+    # ensure core types comparable
+    cml2["sample"] = pd.to_numeric(cml2["sample"], errors="raise")
+    bids2["sample"] = pd.to_numeric(bids2["sample"], errors="raise")
+    cml2["trial_type"] = cml2["trial_type"].astype(str)
+    bids2["trial_type"] = bids2["trial_type"].astype(str)
 
-    # ---------- per-column comparison ----------
-    col_rows = []
-    differing_cols = []
-    mismatch_examples = []
-    print(shared_cols)
-    for col in shared_cols:
-        a = cml_aligned[col]
-        b = bids_aligned[col]
+    # onset conversion
+    cml_onset_s = pd.to_numeric(evs_cml_f["mstime"], errors="raise") / 1000.0
+    bids_onset_s = pd.to_numeric(bids2["onset"], errors="raise")
 
-        if tolerant_numeric and (_is_numeric_series(a) or _is_numeric_series(b)):
-            rtol_use, atol_use = rtol, atol
+    if "compare_onset_as_diff" in options_set:
+        cml2["onset"] = cml_onset_s.diff()
+        bids2["onset"] = bids_onset_s.diff()
+    else:
+        cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
+        bids2["onset"] = bids_onset_s
 
-            # Special-case onset in seconds: allow ms-level tolerance
-            if col == "onset":
-                rtol_use, atol_use = 0.0, 0.002  # 2 ms
+    # ---------- attach metadata columns for downstream compare_shared_columns ----------
+    for df in (cml2, bids2):
+        if "subject" not in df.columns:
+            df["subject"] = subject
+        if "experiment" not in df.columns:
+            df["experiment"] = experiment
+        if "session" not in df.columns:
+            df["session"] = session
 
-            ok = _nan_safe_isclose(a, b, rtol_use=rtol_use, atol_use=atol_use)
-        else:
-            ok = _nan_safe_equal(a.astype("object"), b.astype("object"))
+    # ---------- optionally drop columns now (so compare_shared_columns sees the same schema) ----------
+    if drop_cols:
+        cml2 = cml2.drop(columns=[c for c in drop_cols if c in cml2.columns], errors="ignore")
+        bids2 = bids2.drop(columns=[c for c in drop_cols if c in bids2.columns], errors="ignore")
 
-        n_bad = int((~ok).sum())
-        if n_bad > 0:
-            differing_cols.append(col)
-            bad_idx = np.where(~ok)[0][:max_mismatches]
-            for i in bad_idx:
-                mismatch_examples.append({
-                    "column": col,
-                    "i": int(i),
-                    f"{label_cml}": a.iloc[i],
-                    f"{label_bids}": b.iloc[i],
-                })
-
-        col_rows.append({
-            "column": col,
-            "n_mismatches": n_bad,
-            "fraction_mismatch": (n_bad / n) if n else np.nan,
-            "dtype_cml": str(a.dtype),
-            "dtype_bids": str(b.dtype),
-        })
-
-    df_col_summary = (
-        pd.DataFrame(col_rows)
-        .sort_values(["n_mismatches", "column"], ascending=[False, True])
-        .reset_index(drop=True)
-    )
-    df_mismatches = pd.DataFrame(mismatch_examples)
-
-    # ---------- summary ----------
-    summary = dict(
+    return dict(
+        evs_cml_prepped=cml2.reset_index(drop=True),
+        evs_bids_prepped=bids2.reset_index(drop=True),
         subject=subject,
         experiment=experiment,
         session=session,
-
-        comparison=f"{label_cml} vs {label_bids}",
-        source_a=label_cml,
-        source_b=label_bids,
-
-        n_events_compared=int(n),
-        n_events_cml=int(n_cml),
-        n_events_bids=int(n_bids),
-        length_mismatch=bool(length_mismatch),
-
-        n_columns_compared=int(len(shared_cols)),
-        n_differing_columns=int(len(differing_cols)),
-        differing_columns=differing_cols,
-
-        n_only_in_cml=int(len(only_cml)),
-        n_only_in_bids=int(len(only_bids)),
-        only_in_cml=only_cml,
-        only_in_bids=only_bids,
-
-        any_mismatch=bool(
-            (len(differing_cols) > 0) or length_mismatch or (len(only_cml) > 0) or (len(only_bids) > 0)
-        ),
-        numeric_rtol=float(rtol) if tolerant_numeric else 0.0,
-        numeric_atol=float(atol) if tolerant_numeric else 0.0,
-
-        onset_mode="diff" if "compare_onset_as_diff" in options_set else "absolute",
+        evs_types_used=sorted(evs_types_used),
     )
-    df_summary = pd.DataFrame([summary])
-
-    # ---------- optional prints ----------
-    if "print_behavior_summary" in options_set:
-        print("\n================ BEHAVIOR SUMMARY ================")
-        print(df_summary.to_string(index=False))
-
-    if "print_behavior_col_summary" in options_set:
-        print("\n================ BEHAVIOR PER-COLUMN MISMATCH COUNTS ================")
-        print(df_col_summary.to_string(index=False))
-
-    if "print_behavior_mismatches" in options_set:
-        print("\n================ BEHAVIOR MISMATCH EXAMPLES (first few) ================")
-        if len(df_mismatches) == 0:
-            print("[OK] No mismatches.")
-        else:
-            print(df_mismatches.head(max_mismatches).to_string(index=False))
-
-    # ---------- return payload ----------
-    out = {"df_behavior_summary": df_summary, "ok": not summary["any_mismatch"]}
-
-    if "return_col_summary" in options_set:
-        out["df_behavior_column_summary"] = df_col_summary
-
-    if "return_mismatches" in options_set:
-        out["df_behavior_mismatches"] = df_mismatches
-
-    if "return_aligned" in options_set:
-        out["cml_aligned"] = cml_aligned
-        out["bids_aligned"] = bids_aligned
-
-    return out
 
 
-import numpy as np
-import pandas as pd
-from typing import Iterable, Optional, Sequence, Union, Dict, Any
+def load_bids_events(sub, exp, sess, bids_root, *, return_path=False):
+    """
+    Load BIDS events.tsv trying both ieeg/ and eeg/ folders.
+
+    Tries:
+      datatype: ieeg -> eeg
+      task variants: exp, exp.lower(), exp.upper()
+
+    Returns:
+      df (or (df, path) if return_path=True), or None if not found.
+    """
+    datatypes = ("ieeg", "eeg")
+    task_variants = []
+    for t in (exp, str(exp).lower(), str(exp).upper()):
+        if t not in task_variants:
+            task_variants.append(t)
+
+    for datatype in datatypes:
+        for task in task_variants:
+            bp = BIDSPath(
+                subject=sub,
+                session=str(sess),
+                task=task,
+                datatype=datatype,
+                suffix="events",
+                extension=".tsv",
+                root=bids_root,
+                check=False,
+            )
+            fpath = bp.fpath
+            if fpath is not None and os.path.exists(fpath):
+                df = pd.read_csv(fpath, sep="\t")
+                return (df, fpath) if return_path else df
+
+    return None
+
+def process_events(
+    sub,
+    exp,
+    sess,
+    evs_types,
+    bids_root,
+    out_path,
+    *,
+    skip_if_exists: bool = True,
+):
+    os.makedirs(out_path, exist_ok=True)
+    out_behavior_summary = os.path.join(
+        out_path, f"df_behavior_summary_{sub}_{exp}_{sess}.csv"
+    )
+
+    expected = [out_behavior_summary]
+    if skip_if_exists and _all_exist(expected):
+        return {"skipped": True, "reason": "outputs_exist", "paths": expected}
+
+    # -------------------- Load CML --------------------
+    try:
+        cmlreader = cml.CMLReader(subject=sub, experiment=exp, session=sess)
+        evs_cml = cmlreader.load("events")
+    except Exception as e:
+        print(f"Failed to load CML events for {sub} | {exp} | {sess}: {e}")
+        return {"skipped": True, "reason": "cml_load_failed", "error": str(e)}
+
+    if exp == "ValueCourier":
+        evs_cml = fix_evs_cml(evs_cml)
+
+    # -------------------- Load BIDS --------------------
+    tmp = load_bids_events(sub, exp, sess, bids_root, return_path=True)
+    if tmp is None:
+        print(f"Skipping {sub} | {exp} | {sess}: BIDS events not found")
+        return {"skipped": True, "reason": "bids_events_not_found"}
+
+    evs_bids, bids_events_path = tmp
+    # print(f"[BIDS] Loaded events from: {bids_events_path}")
+
+    if exp == "ValueCourier":
+        evs_bids = fix_evs_bids(evs_bids)
+
+    # -------------------- Prep (normalization + filtering) --------------------
+    try:
+        prep = prep_cml_bids_events(
+            evs_cml,
+            evs_bids,
+            evs_types=evs_types,
+            bids_is_eeg=True,
+            options=[
+                "compare_onset_as_diff",
+                "tolerant_numeric",
+            ],
+            drop_cols=[],
+            subject=sub,
+            experiment=exp,
+            session=sess,
+        )
+
+        evs_cml_prepped = prep["evs_cml_prepped"]
+        evs_bids_prepped = prep["evs_bids_prepped"]
+
+        if len(evs_cml_prepped) == 0 or len(evs_bids_prepped) == 0:
+            print(f"Skipping {sub} | {exp} | {sess}: No matching events after filtering")
+            return {"skipped": True, "reason": "no_matching_events"}
+
+    except Exception as e:
+        print(f"Failed during prep for {sub} | {exp} | {sess}: {e}")
+        return {"skipped": True, "reason": "prep_failed", "error": str(e)}
+
+    # -------------------- Compare --------------------
+    try:
+        results = compare_shared_columns(
+            evs_cml_prepped,
+            "CMLReader",
+            evs_bids_prepped,
+            "OpenBIDS",
+            options=[
+                "tolerant_numeric",
+                "return_aligned",
+            ],
+            drop_cols=[],
+            sort_keys=["sample", "trial_type"],
+            subject=sub,
+            experiment=exp,
+            session=sess,
+        )
+
+        # Save main summary
+        results["df_summary"].to_csv(out_behavior_summary, index=False)
+
+        print(f"Successfully processed {sub} | {exp} | {sess}")
+        return results
+
+    except Exception as e:
+        print(f"Failed to compare events for {sub} | {exp} | {sess}: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"skipped": True, "reason": "comparison_failed", "error": str(e)}
+
+
+# def process_events(sub, exp, sess, evs_types, bids_root, out_path, *, skip_if_exists=True):
+#     os.makedirs(out_path, exist_ok=True)
+#     out_behavior_summary = os.path.join(out_path, f"df_behavior_summary_{sub}_{exp}_{sess}.csv")
+    
+#     expected = [out_behavior_summary]
+#     if skip_if_exists and _all_exist(expected):
+#         return {"skipped": True, "reason": "outputs_exist", "paths": expected}
+    
+#     # Load CML events
+#     try:
+#         cmlreader = cml.CMLReader(subject=sub, experiment=exp, session=sess)
+#         evs_cml = cmlreader.load('events')
+#         # print(evs_cml.columns)
+#         # print(evs_cml)
+#     except Exception as e:
+#         print(f"Failed to load CML events for {sub} | {exp} | {sess}: {e}")
+#         return {"skipped": True, "reason": "cml_load_failed", "error": str(e)}
+    
+#     evs_types_set = set(evs_types) if evs_types is not None else set(evs_cml["type"].unique())
+#     # print(evs_cml.columns)
+#     if exp == "ValueCourier":
+#         evs_cml = fix_evs_cml(evs_cml)
+#     # print(evs_cml.columns)
+    
+#     filtered_evs_cml = evs_cml[evs_cml["type"].isin(evs_types_set)]
+#     # print(filtered_evs_cml.columns)
+    
+#     # Load BIDS events
+#     tmp = load_bids_events(sub, exp, sess, bids_root, return_path=True)
+#     if tmp is None:
+#         print(f"Skipping {sub} | {exp} | {sess}: BIDS events file not found in eeg/ or ieeg/")
+#         return {"skipped": True, "reason": "bids_events_not_found"}
+
+#     evs_bids, bids_events_path = tmp
+#     print(f"[BIDS] Loaded events from: {bids_events_path}")
+    
+#     if evs_bids is None:
+#         print(f"Skipping {sub} | {exp} | {sess}: BIDS events file not found")
+#         return {"skipped": True, "reason": "bids_events_not_found"}
+    
+#     if exp == "ValueCourier":
+#         evs_bids = fix_evs_bids(evs_bids)
+    
+    
+#     # Check for required columns
+#     required_cols = {'sample', 'onset', 'trial_type'}
+#     missing_cols = required_cols - set(evs_bids.columns)
+#     if missing_cols:
+#         print(f"Skipping {sub} | {exp} | {sess}: BIDS events missing required columns: {missing_cols}")
+#         print(f"Available columns: {list(evs_bids.columns)}")
+#         return {"skipped": True, "reason": "missing_columns", "missing": list(missing_cols)}
+    
+#     filtered_evs_bids = evs_bids[evs_bids["trial_type"].isin(evs_types_set)]
+    
+#     if filtered_evs_bids.empty:
+#         print(f"Skipping {sub} | {exp} | {sess}: No events match the requested types")
+#         return {"skipped": True, "reason": "no_matching_events"}
+#     print(filtered_evs_bids.columns)
+#     # Compare behavioral data
+#     try:
+#         i = 0
+#         results = compare_behavioral(
+#             filtered_evs_cml, "CMLReader",
+#             filtered_evs_bids, "OpenBIDS",
+#             options=[
+#                 "compare_onset_as_diff",
+#                 "tolerant_numeric",
+#                 "return_col_summary",
+#                 "return_mismatches",
+#             ],
+#             drop_cols=[],
+#         )
+        
+#         os.makedirs(out_path, exist_ok=True)
+#         results["df_behavior_summary"].to_csv(
+#             os.path.join(out_path, f"df_behavior_summary_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+        
+#         print(f"Successfully processed {sub} | {exp} | {sess}")
+#         return results
+        
+#     except Exception as e:
+#         print(f"Failed to compare events for {sub} | {exp} | {sess}: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         return {"skipped": True, "reason": "comparison_failed", "error": str(e)}
+
+# def compare_behavioral(
+#     evs_cml,
+#     label_cml,
+#     evs_bids,
+#     label_bids,
+#     *,
+#     bids_is_eeg=True,
+#     options=None,
+#     rtol=RTOL,
+#     atol=ATOL,
+#     max_mismatches=20,
+#     drop_cols=(),
+# ):
+#     """
+#     Compare CML vs BIDS behavioral/event tables allowing for known column name/definition differences:
+#       - eegoffset -> sample
+#       - mstime -> onset  (CML ms -> seconds)
+#       - type -> trial_type
+
+#     Then compares ALL other shared columns too.
+
+#     New option:
+#       - "compare_onset_as_diff" : compare onset as diff() in both sources (inter-event intervals)
+#                                  else compare absolute onset (CML shifted to start at 0; BIDS as-is)
+
+#     Other Options:
+#       - "align_by_index"              : don't sort; compare row order as-is
+#       - "allow_length_mismatch"       : compare only min(n_cml, n_bids)
+#       - "tolerant_numeric"            : numeric cols compared with isclose(rtol/atol) (default ON)
+#       - "print_behavior_summary"      : print 1-row summary
+#       - "print_behavior_col_summary"  : print per-column mismatch counts
+#       - "print_behavior_mismatches"   : print example mismatching cells (long format)
+#       - "return_aligned"              : return aligned comparison tables
+#       - "return_col_summary"          : return per-column summary df
+#       - "return_mismatches"           : return mismatch df (example cells)
+#     """
+#     options_set = set(options or ())
+#     tolerant_numeric = ("tolerant_numeric" in options_set) or ("tolerant_onset" in options_set)  # backward compat
+#     drop_cols = set(drop_cols or ())
+
+#     # ---------- helpers ----------
+#     def _one_unique(df, col, label):
+#         if col not in df.columns:
+#             return None
+#         vals = df[col].dropna().unique()
+#         if len(vals) == 0:
+#             return None
+#         if len(vals) != 1:
+#             raise ValueError(f"{label}: column '{col}' has {len(vals)} unique values: {vals[:10]}")
+#         return vals[0]
+
+#     def _is_numeric_series(s: pd.Series) -> bool:
+#         return pd.api.types.is_numeric_dtype(s)
+
+#     def _nan_safe_equal(a: pd.Series, b: pd.Series) -> np.ndarray:
+#         a = a.to_numpy()
+#         b = b.to_numpy()
+#         both_nan = pd.isna(a) & pd.isna(b)
+#         return (a == b) | both_nan
+
+#     def _nan_safe_isclose(a: pd.Series, b: pd.Series, *, rtol_use, atol_use) -> np.ndarray:
+#         a = pd.to_numeric(a, errors="coerce").to_numpy()
+#         b = pd.to_numeric(b, errors="coerce").to_numpy()
+#         return np.isclose(a, b, rtol=rtol_use, atol=atol_use, equal_nan=True)
+
+#     # ---------- subject/experiment/session checks ----------
+#     subject_cml = _one_unique(evs_cml, "subject", label_cml)
+#     subject_bids = _one_unique(evs_bids, "subject", label_bids)
+#     experiment_cml = _one_unique(evs_cml, "experiment", label_cml)
+#     experiment_bids = _one_unique(evs_bids, "experiment", label_bids)
+#     session_cml = _one_unique(evs_cml, "session", label_cml)
+#     session_bids = _one_unique(evs_bids, "session", label_bids)
+
+#     if subject_cml is not None and subject_bids is not None and subject_cml != subject_bids:
+#         raise ValueError(f"Subjects differ: {label_cml}={subject_cml} vs {label_bids}={subject_bids}")
+#     if experiment_cml is not None and experiment_bids is not None and experiment_cml != experiment_bids:
+#         raise ValueError(f"Experiments differ: {label_cml}={experiment_cml} vs {label_bids}={experiment_bids}")
+#     if session_cml is not None and session_bids is not None and session_cml != session_bids:
+#         raise ValueError(f"Sessions differ: {label_cml}={session_cml} vs {label_bids}={session_bids}")
+
+#     subject = subject_cml if subject_cml is not None else subject_bids
+#     experiment = experiment_cml if experiment_cml is not None else experiment_bids
+#     session = session_cml if session_cml is not None else session_bids
+
+#     # ---------- required cols ----------
+#     if bids_is_eeg:
+#         required_cml = {"eegoffset", "mstime", "type"}
+#         required_bids = {"sample", "onset", "trial_type"}
+
+#         missing_cml = required_cml - set(evs_cml.columns)
+#         missing_bids = required_bids - set(evs_bids.columns)
+#         if missing_cml:
+#             raise ValueError(f"{label_cml}: missing required columns: {sorted(missing_cml)}")
+#         if missing_bids:
+#             raise ValueError(f"{label_bids}: missing required columns: {sorted(missing_bids)}")
+
+#         # ---------- normalize CML to BIDS-like names ----------
+#         cml2 = evs_cml.copy()
+#         bids2 = evs_bids.copy()
+
+#         # CML sentinel missing -> NaN (and common empty-string missing)
+#         cml2 = cml2.replace({-999: np.nan, -999.0: np.nan, "-999": np.nan, "": np.nan})
+
+#         # rename to match BIDS schema for the 3 key cols
+#         cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
+
+#         # ensure mapped cols numeric/string comparable
+#         cml2["sample"] = pd.to_numeric(cml2["sample"], errors="raise")
+#         bids2["sample"] = pd.to_numeric(bids2["sample"], errors="raise")
+#         cml2["trial_type"] = cml2["trial_type"].astype(str)
+#         bids2["trial_type"] = bids2["trial_type"].astype(str)
+
+#         # ---- onset construction (NEW) ----
+#         # Convert CML onset (ms) -> seconds; BIDS onset assumed seconds
+#         cml_onset_s = pd.to_numeric(evs_cml["mstime"], errors="raise") / 1000.0
+#         bids_onset_s = pd.to_numeric(bids2["onset"], errors="raise")
+
+#         if "compare_onset_as_diff" in options_set:
+#             # Compare inter-event intervals
+#             cml2["onset"] = cml_onset_s.diff()
+#             print(cml2["onset"])
+#             bids2["onset"] = bids_onset_s.diff()
+#             print(bids2["onset"])
+#         else:
+#             # Compare absolute onset (CML shifted to start at 0)
+#             cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
+#             print(cml2["onset"])
+#             bids2["onset"] = bids_onset_s
+#             print(bids2["onset"])
+
+#     # ---------- choose columns to compare (ALL shared columns) ----------
+#     shared_cols = sorted((set(cml2.columns) & set(bids2.columns)) - drop_cols)
+
+#     only_cml = sorted(set(cml2.columns) - set(bids2.columns) - drop_cols)
+#     only_bids = sorted(set(bids2.columns) - set(cml2.columns) - drop_cols)
+
+#     # ---------- align rows ----------
+#     if "align_by_index" in options_set:
+#         cml_aligned = cml2[shared_cols].reset_index(drop=True)
+#         bids_aligned = bids2[shared_cols].reset_index(drop=True)
+#     else:
+#         # robust tie-break for duplicate samples
+#         tie_keys = [k for k in ["sample", "trial_type"] if k in shared_cols]
+#         # only use onset as a tie-break when NOT comparing diff(onset)
+#         if "compare_onset_as_diff" not in options_set and "onset" in shared_cols:
+#             tie_keys.append("onset")
+
+#         cml_aligned = cml2[shared_cols].sort_values(tie_keys, kind="mergesort").reset_index(drop=True)
+#         bids_aligned = bids2[shared_cols].sort_values(tie_keys, kind="mergesort").reset_index(drop=True)
+
+#     n_cml = len(cml_aligned)
+#     n_bids = len(bids_aligned)
+#     length_mismatch = (n_cml != n_bids)
+
+#     if length_mismatch and ("allow_length_mismatch" not in options_set):
+#         raise AssertionError(f"Event count mismatch: {label_cml}={n_cml} vs {label_bids}={n_bids}")
+
+#     n = min(n_cml, n_bids)
+#     cml_aligned = cml_aligned.iloc[:n].reset_index(drop=True)
+#     bids_aligned = bids_aligned.iloc[:n].reset_index(drop=True)
+
+#     # ---------- per-column comparison ----------
+#     col_rows = []
+#     differing_cols = []
+#     mismatch_examples = []
+#     print(shared_cols)
+#     for col in shared_cols:
+#         a = cml_aligned[col]
+#         b = bids_aligned[col]
+
+#         if tolerant_numeric and (_is_numeric_series(a) or _is_numeric_series(b)):
+#             rtol_use, atol_use = rtol, atol
+
+#             # Special-case onset in seconds: allow ms-level tolerance
+#             if col == "onset":
+#                 rtol_use, atol_use = 0.0, 0.002  # 2 ms
+
+#             ok = _nan_safe_isclose(a, b, rtol_use=rtol_use, atol_use=atol_use)
+#         else:
+#             ok = _nan_safe_equal(a.astype("object"), b.astype("object"))
+
+#         n_bad = int((~ok).sum())
+#         if n_bad > 0:
+#             differing_cols.append(col)
+#             bad_idx = np.where(~ok)[0][:max_mismatches]
+#             for i in bad_idx:
+#                 mismatch_examples.append({
+#                     "column": col,
+#                     "i": int(i),
+#                     f"{label_cml}": a.iloc[i],
+#                     f"{label_bids}": b.iloc[i],
+#                 })
+
+#         col_rows.append({
+#             "column": col,
+#             "n_mismatches": n_bad,
+#             "fraction_mismatch": (n_bad / n) if n else np.nan,
+#             "dtype_cml": str(a.dtype),
+#             "dtype_bids": str(b.dtype),
+#         })
+
+#     df_col_summary = (
+#         pd.DataFrame(col_rows)
+#         .sort_values(["n_mismatches", "column"], ascending=[False, True])
+#         .reset_index(drop=True)
+#     )
+#     df_mismatches = pd.DataFrame(mismatch_examples)
+
+#     # ---------- summary ----------
+#     summary = dict(
+#         subject=subject,
+#         experiment=experiment,
+#         session=session,
+
+#         comparison=f"{label_cml} vs {label_bids}",
+#         source_a=label_cml,
+#         source_b=label_bids,
+
+#         n_events_compared=int(n),
+#         n_events_cml=int(n_cml),
+#         n_events_bids=int(n_bids),
+#         length_mismatch=bool(length_mismatch),
+
+#         n_columns_compared=int(len(shared_cols)),
+#         n_differing_columns=int(len(differing_cols)),
+#         differing_columns=differing_cols,
+
+#         n_only_in_cml=int(len(only_cml)),
+#         n_only_in_bids=int(len(only_bids)),
+#         only_in_cml=only_cml,
+#         only_in_bids=only_bids,
+
+#         any_mismatch=bool(
+#             (len(differing_cols) > 0) or length_mismatch or (len(only_cml) > 0) or (len(only_bids) > 0)
+#         ),
+#         numeric_rtol=float(rtol) if tolerant_numeric else 0.0,
+#         numeric_atol=float(atol) if tolerant_numeric else 0.0,
+
+#         onset_mode="diff" if "compare_onset_as_diff" in options_set else "absolute",
+#     )
+#     df_summary = pd.DataFrame([summary])
+
+#     # ---------- optional prints ----------
+#     if "print_behavior_summary" in options_set:
+#         print("\n================ BEHAVIOR SUMMARY ================")
+#         print(df_summary.to_string(index=False))
+
+#     if "print_behavior_col_summary" in options_set:
+#         print("\n================ BEHAVIOR PER-COLUMN MISMATCH COUNTS ================")
+#         print(df_col_summary.to_string(index=False))
+
+#     if "print_behavior_mismatches" in options_set:
+#         print("\n================ BEHAVIOR MISMATCH EXAMPLES (first few) ================")
+#         if len(df_mismatches) == 0:
+#             print("[OK] No mismatches.")
+#         else:
+#             print(df_mismatches.head(max_mismatches).to_string(index=False))
+
+#     # ---------- return payload ----------
+#     out = {"df_behavior_summary": df_summary, "ok": not summary["any_mismatch"]}
+
+#     if "return_col_summary" in options_set:
+#         out["df_behavior_column_summary"] = df_col_summary
+
+#     if "return_mismatches" in options_set:
+#         out["df_behavior_mismatches"] = df_mismatches
+
+#     if "return_aligned" in options_set:
+#         out["cml_aligned"] = cml_aligned
+#         out["bids_aligned"] = bids_aligned
+
+#     return out
+
 
 def compare_shared_columns(
     df_a: pd.DataFrame,
@@ -540,224 +898,24 @@ def compare_shared_columns(
     if "return_aligned" in options_set:
         a_out = a_aligned.copy()
         b_out = b_aligned.copy()
-        a_out.insert(0, "session", session)
-        a_out.insert(0, "experiment", experiment)
-        a_out.insert(0, "subject", subject)
-        b_out.insert(0, "session", session)
-        b_out.insert(0, "experiment", experiment)
-        b_out.insert(0, "subject", subject)
+
+        for df in (a_out, b_out):
+            for col, val in [
+                ("subject", subject),
+                ("experiment", experiment),
+                ("session", session),
+            ]:
+                if col not in df.columns:
+                    df.insert(0, col, val)
+
         out["a_aligned"] = a_out
         out["b_aligned"] = b_out
 
+
     return out
 
-
-# def compare_shared_columns(
-#     df_a: pd.DataFrame,
-#     label_a: str,
-#     df_b: pd.DataFrame,
-#     label_b: str,
-#     *,
-#     options: Optional[Iterable[str]] = None,
-#     tolerant_numeric: Optional[bool] = None,
-#     rtol: float = 1e-6,
-#     atol: float = 1e-8,
-#     max_mismatches: int = 20,
-#     drop_cols: Union[Sequence[str], set, tuple] = (),
-#     sort_keys: Optional[Sequence[str]] = None,
-#     allow_length_mismatch: bool = False,
-#     summary_outfile: Optional[str] = None,
-# ) -> Dict[str, Any]:
-#     """
-#     Generic comparator: compares all shared columns between df_a and df_b.
-
-#     Features:
-#       - Numeric columns: compare with np.isclose (rtol/atol) when tolerant_numeric=True
-#       - Non-numeric: compare with exact equality, NaN-safe
-#       - Row alignment:
-#           * options contains "align_by_index": compare row order as-is
-#           * else: if sort_keys provided, sort by those columns (stable) before comparing
-#             (sort_keys are filtered to shared columns)
-#       - Length mismatch handling:
-#           * if allow_length_mismatch=True (or option "allow_length_mismatch"), compare min(n_a, n_b)
-#           * else raise AssertionError if lengths differ
-
-#     Outputs:
-#       - df_summary: 1-row summary dataframe
-#       - df_column_summary: per-column mismatch counts
-#       - df_mismatches: long-format mismatch examples
-#       - optionally aligned dfs when "return_aligned" in options
-#     """
-#     options_set = set(options or ())
-#     drop_cols = set(drop_cols or ())
-
-#     if tolerant_numeric is None:
-#         tolerant_numeric = ("tolerant_numeric" in options_set)
-
-#     if allow_length_mismatch or ("allow_length_mismatch" in options_set):
-#         allow_len = True
-#     else:
-#         allow_len = False
-
-#     def _is_numeric_series(s: pd.Series) -> bool:
-#         return pd.api.types.is_numeric_dtype(s)
-
-#     def _nan_safe_equal(a: pd.Series, b: pd.Series) -> np.ndarray:
-#         a = a.to_numpy()
-#         b = b.to_numpy()
-#         both_nan = pd.isna(a) & pd.isna(b)
-#         return (a == b) | both_nan
-
-#     def _nan_safe_isclose(a: pd.Series, b: pd.Series) -> np.ndarray:
-#         a = pd.to_numeric(a, errors="coerce").to_numpy()
-#         b = pd.to_numeric(b, errors="coerce").to_numpy()
-#         return np.isclose(a, b, rtol=rtol, atol=atol, equal_nan=True)
-
-#     a2 = df_a.copy()
-#     b2 = df_b.copy()
-
-#     # choose columns to compare
-#     shared_cols = sorted((set(a2.columns) & set(b2.columns)) - drop_cols)
-#     only_a = sorted(set(a2.columns) - set(b2.columns) - drop_cols)
-#     only_b = sorted(set(b2.columns) - set(a2.columns) - drop_cols)
-
-#     # align rows
-#     if "align_by_index" in options_set or sort_keys is None:
-#         a_aligned = a2[shared_cols].reset_index(drop=True)
-#         b_aligned = b2[shared_cols].reset_index(drop=True)
-#     else:
-#         # use only keys that actually exist in shared cols
-#         keys = [k for k in sort_keys if k in shared_cols]
-#         if len(keys) == 0:
-#             # fall back to index alignment if no usable keys
-#             a_aligned = a2[shared_cols].reset_index(drop=True)
-#             b_aligned = b2[shared_cols].reset_index(drop=True)
-#         else:
-#             a_aligned = a2[shared_cols].sort_values(keys, kind="mergesort").reset_index(drop=True)
-#             b_aligned = b2[shared_cols].sort_values(keys, kind="mergesort").reset_index(drop=True)
-
-#     n_a = len(a_aligned)
-#     n_b = len(b_aligned)
-#     length_mismatch = (n_a != n_b)
-
-#     if length_mismatch and not allow_len:
-#         raise AssertionError(f"Row count mismatch: {label_a}={n_a} vs {label_b}={n_b}")
-
-#     n = min(n_a, n_b)
-#     a_aligned = a_aligned.iloc[:n].reset_index(drop=True)
-#     b_aligned = b_aligned.iloc[:n].reset_index(drop=True)
-
-#     # compare per column
-#     col_rows = []
-#     differing_cols = []
-#     mismatch_examples = []
-
-#     for col in shared_cols:
-#         sa = a_aligned[col]
-#         sb = b_aligned[col]
-
-#         if tolerant_numeric and (_is_numeric_series(sa) or _is_numeric_series(sb)):
-#             ok = _nan_safe_isclose(sa, sb)
-#         else:
-#             ok = _nan_safe_equal(sa.astype("object"), sb.astype("object"))
-
-#         n_bad = int((~ok).sum())
-#         if n_bad > 0:
-#             differing_cols.append(col)
-#             bad_idx = np.where(~ok)[0][:max_mismatches]
-#             for i in bad_idx:
-#                 mismatch_examples.append({
-#                     "column": col,
-#                     "i": int(i),
-#                     label_a: sa.iloc[i],
-#                     label_b: sb.iloc[i],
-#                 })
-
-#         col_rows.append({
-#             "column": col,
-#             "n_mismatches": n_bad,
-#             "fraction_mismatch": (n_bad / n) if n else np.nan,
-#             "dtype_a": str(sa.dtype),
-#             "dtype_b": str(sb.dtype),
-#             "numeric_compared_with_isclose": bool(
-#                 tolerant_numeric and (_is_numeric_series(sa) or _is_numeric_series(sb))
-#             ),
-#         })
-
-#     df_column_summary = (
-#         pd.DataFrame(col_rows)
-#         .sort_values(["n_mismatches", "column"], ascending=[False, True])
-#         .reset_index(drop=True)
-#     )
-#     df_mismatches = pd.DataFrame(mismatch_examples)
-
-#     summary = dict(
-#         comparison=f"{label_a} vs {label_b}",
-#         source_a=label_a,
-#         source_b=label_b,
-
-#         n_rows_compared=int(n),
-#         n_rows_a=int(n_a),
-#         n_rows_b=int(n_b),
-#         length_mismatch=bool(length_mismatch),
-
-#         n_columns_compared=int(len(shared_cols)),
-#         n_differing_columns=int(len(differing_cols)),
-#         differing_columns=differing_cols,
-
-#         n_only_in_a=int(len(only_a)),
-#         n_only_in_b=int(len(only_b)),
-#         only_in_a=only_a,
-#         only_in_b=only_b,
-
-#         any_mismatch=bool(
-#             (len(differing_cols) > 0) or length_mismatch or (len(only_a) > 0) or (len(only_b) > 0)
-#         ),
-
-#         tolerant_numeric=bool(tolerant_numeric),
-#         numeric_rtol=float(rtol) if tolerant_numeric else 0.0,
-#         numeric_atol=float(atol) if tolerant_numeric else 0.0,
-#         sort_keys_used=[k for k in (sort_keys or []) if k in shared_cols] if ("align_by_index" not in options_set) else [],
-#         align_mode="index" if ("align_by_index" in options_set or sort_keys is None) else "sorted",
-#     )
-#     df_summary = pd.DataFrame([summary])
-
-#     # optional prints
-#     if "print_summary" in options_set:
-#         print("\n================ SUMMARY ================")
-#         print(df_summary.to_string(index=False))
-
-#     if "print_col_summary" in options_set:
-#         print("\n================ PER-COLUMN MISMATCH COUNTS ================")
-#         print(df_column_summary.to_string(index=False))
-
-#     if "print_mismatches" in options_set:
-#         print("\n================ MISMATCH EXAMPLES ================")
-#         if len(df_mismatches) == 0:
-#             print("[OK] No mismatches.")
-#         else:
-#             print(df_mismatches.head(max_mismatches).to_string(index=False))
-
-#     # optional save summary
-#     if summary_outfile is not None:
-#         df_summary.to_csv(summary_outfile, index=False)
-
-#     out: Dict[str, Any] = {
-#         "df_summary": df_summary,
-#         "df_column_summary": df_column_summary,
-#         "df_mismatches": df_mismatches,
-#         "ok": not summary["any_mismatch"],
-#     }
-
-#     if "return_aligned" in options_set:
-#         out["a_aligned"] = a_aligned
-#         out["b_aligned"] = b_aligned
-
-#     return out
-
-
 # ----------------------------
-# HELPERS
+# Compare EEG
 # ----------------------------
 def load_bdf_as_xarray(path: str, *, event_dim_name="event") -> xr.DataArray:
     f = pyedflib.EdfReader(path)
@@ -1063,81 +1221,6 @@ def compare_raw_signal_pairs(label_a: str, da_a: xr.DataArray, label_b: str, da_
     return df, exact_fail, close_fail, common_ch, close_diff_event_indices, n_events
 
 
-# def compare_time_coord_pairs(label_a: str, da_a: xr.DataArray, label_b: str, da_b: xr.DataArray):
-#     """
-#     Compare the *time coordinate values* between two EEG DataArrays.
-
-#     Assumes:
-#       - da_* has a 'time' coordinate or dimension
-#       - comparison is by index (crop to min length), not by alignment
-
-#     Returns:
-#       df_time_stats : pd.DataFrame with a single row of summary stats
-#       exact_fail    : bool (True if any exact mismatch)
-#       close_fail    : bool (True if any allclose mismatch)
-#       diff_vec      : np.ndarray of time differences (time_a - time_b) on compared indices (NaN where invalid)
-#     """
-#     if "time" not in da_a.dims or "time" not in da_b.dims:
-#         raise ValueError(f"Both inputs must have a 'time' dimension. Got da_a.dims={da_a.dims}, da_b.dims={da_b.dims}")
-
-#     # Pull time coordinate arrays if present; else fall back to index.
-#     # (Usually time is a coordinate of the 'time' dim.)
-#     if "time" in da_a.coords:
-#         t_a = np.asarray(da_a["time"].values)
-#     else:
-#         t_a = np.arange(da_a.sizes["time"], dtype=float)
-
-#     if "time" in da_b.coords:
-#         t_b = np.asarray(da_b["time"].values)
-#     else:
-#         t_b = np.arange(da_b.sizes["time"], dtype=float)
-
-#     # Ensure 1D
-#     t_a = np.squeeze(t_a)
-#     t_b = np.squeeze(t_b)
-
-#     # Crop by index to common length
-#     t_a2, t_b2, m = _crop_time_to_min(t_a, t_b)
-
-#     # NaN-safe exact + close
-#     both_nan = np.isnan(t_a2) & np.isnan(t_b2)
-#     exact_bad = ~((t_a2 == t_b2) | both_nan)
-#     close_bad = ~np.isclose(t_a2, t_b2, rtol=RTOL, atol=ATOL, equal_nan=True)
-
-#     diff = t_a2 - t_b2
-#     invalid = both_nan | np.isnan(t_a2) | np.isnan(t_b2)
-#     diff = np.where(invalid, np.nan, diff)
-#     abs_diff = np.abs(diff)
-
-#     n_exact = int(np.sum(exact_bad))
-#     n_close = int(np.sum(close_bad))
-
-#     mean_abs = float(np.nanmean(abs_diff)) if np.isfinite(abs_diff).any() else np.nan
-#     max_abs  = float(np.nanmax(abs_diff))  if np.isfinite(abs_diff).any() else np.nan
-#     mean_signed = float(np.nanmean(diff))  if np.isfinite(diff).any() else np.nan
-#     std_diff = float(np.nanstd(diff))      if np.isfinite(diff).any() else np.nan
-#     mse_time = float(np.nanmean(diff**2))  if np.isfinite(diff).any() else np.nan
-
-#     df = pd.DataFrame([dict(
-#         comparison=f"{label_a} vs {label_b}",
-#         time_len_a=int(len(t_a)),
-#         time_len_b=int(len(t_b)),
-#         time_compared_samples=int(m),
-
-#         n_exact_time_diff=n_exact,
-#         n_close_time_diff=n_close,
-
-#         mean_abs_time_diff=mean_abs,
-#         max_abs_time_diff=max_abs,
-#         mean_signed_time_diff=mean_signed,
-#         std_time_diff=std_diff,
-#         mse_time=mse_time,
-#     )])
-
-#     exact_fail = (n_exact != 0)
-#     close_fail = (n_close != 0)
-
-#     return df, exact_fail, close_fail, diff
 
 def compare_time_coord_pairs(label_a: str, da_a: xr.DataArray, label_b: str, da_b: xr.DataArray):
     """
@@ -1217,7 +1300,6 @@ def compare_time_coord_pairs(label_a: str, da_a: xr.DataArray, label_b: str, da_
     close_fail = (n_close != 0)
 
     return df, exact_fail, close_fail, diff, close_diff_event_indices, n_events
-
 
 
 
@@ -1527,61 +1609,152 @@ def fix_evs_cml(full_evs):
                 
     return full_evs
 
-
+def is_intracranial(localization, montage):
+    return (localization is not None) and (montage is not None)
 
 # subject
-def process_raw_signals(sub, exp, sess, bids_root, out_path): # entire signal, not epoched
+def process_raw_signals(sub, exp, sess, bids_root, out_path, localization=None, montage=None): 
+    is_ieeg = is_intracranial(localization, montage)
     ### load cml
-    reader = cml.CMLReader(subject=sub, experiment=exp, session=sess)
-    eeg_cml = reader.load_eeg().to_ptsa()
+    reader = cml.CMLReader(subject=sub, experiment=exp, session=sess, localization=localization, montage=montage)
+    if is_ieeg:
+        contacts = reader.load("contacts")
+        contacts = reader.load("pairs")
+        eeg_contacts_cml = reader.load_eeg(scheme=contacts).to_ptsa()
+        eeg_pairs_cml = reader.load_eeg(scheme=pairs).to_ptsa()
+    else:
+        eeg_cml = reader.load_eeg().to_ptsa()
 
     ### load bdf
     # BIDS
-    bids_path = BIDSPath(
-        subject=sub,
-        session=str(sess),
-        task=exp.lower(),
-        datatype="eeg",
-        root=bids_root,
-    )
+    if is_ieeg:
+        # mono
+        base = BIDSPath(
+            subject=sub,
+            session=str(sess),
+            task=exp,
+            datatype="ieeg",
+            root=bids_root,
+            check=False
+        )
+        
+        ch_mono = pd.read_csv(
+            base.copy().update(
+                acquisition="monopolar",
+                suffix="channels",
+                extension=".tsv"
+            ).fpath,
+            sep="\t"
+        )
 
-    raw = read_raw_bids(
-        bids_path,
-        verbose=True,
-    )
 
-    eeg_bids = xr.DataArray(
-        raw.get_data()[None, :, :],                           # -> (1, n_channels, n_times)
-        dims=("event", "channel", "time"),         # match eeg_cml dim names
-        coords={
-            "event": [0],                          # singleton event index
-            "channel": raw.ch_names,
-            "time": raw.times * 1000,
-            "samplerate": raw.info["sfreq"],                    # scalar coord (optional)
-        },
-        name="eeg",
-    )
+        raw_mono = read_raw_bids(
+            ch_mono,
+            verbose=True,
+        )
 
-    ## load pyedf
-    # cml_bdf_path  = f"/protocols/ltp/subjects/{sub}/experiments/{exp}/sessions/{sess}/ephys/current_processed/{sub}_session_{sess}.bdf"
-    # eeg_pyedflib = load_bdf_as_xarray(cml_bdf_path)
+        eeg_mono_bids = xr.DataArray(
+            raw_mono.get_data()[None, :, :],                           # -> (1, n_channels, n_times)
+            dims=("event", "channel", "time"),         # match eeg_cml dim names
+            coords={
+                "event": [0],                          # singleton event index
+                "channel": raw_mono.ch_names,
+                "time": raw_mono.times * 1000,
+                "samplerate": raw_mono.info["sfreq"],                    # scalar coord (optional)
+            },
+            name="eeg",
+        ) 
+        # compare
+        results = compare_eeg_sources(
+            eeg_dict={"BIDS": eeg_mono_bids, "CMLReader": eeg_contacts_cml},
+            subject=sub,
+            experiment=exp,
+            session=sess,
+            options=["strip_metadata", "compare_raw_signals", "compare_time_coords"]
+        )
 
-    # compare
-    results = compare_eeg_sources(
-        eeg_dict={"BIDS": eeg_bids, "CMLReader": eeg_cml},
-        subject=sub,
-        experiment=exp,
-        session=sess,
-        options=["strip_metadata", "compare_raw_signals", "compare_time_coords"]
-    )
-    
-    results["df_raw"].to_csv(f"{out_path}df_raw_{sub}_{exp}_{sess}.csv", index=False)
-    results["df_raw_summary"].to_csv(f"{out_path}df_raw_summary_{sub}_{exp}_{sess}.csv", index=False)
-    results["df_time"].to_csv(f"{out_path}df_time_{sub}_{exp}_{sess}.csv", index=False)
+        results["df_raw"].to_csv(f"{out_path}df_raw_{sub}_{exp}_{sess}_mono.csv", index=False)
+        results["df_raw_summary"].to_csv(f"{out_path}df_raw_summary_{sub}_{exp}_{sess}_mono.csv", index=False)
+        results["df_time"].to_csv(f"{out_path}df_time_{sub}_{exp}_{sess}_mono.csv", index=False)
+        
+        # bipolar
+        ch_bi = pd.read_csv(
+            base.copy().update(
+                acquisition="bipolar",
+                suffix="channels",
+                extension=".tsv"
+            ).fpath,
+            sep="\t"
+        )
+
+
+        raw_bi = read_raw_bids(
+            ch_bi,
+            verbose=True,
+        )
+
+        eeg_bi_bids = xr.DataArray(
+            raw_mono.get_data()[None, :, :],                           # -> (1, n_channels, n_times)
+            dims=("event", "channel", "time"),         # match eeg_cml dim names
+            coords={
+                "event": [0],                          # singleton event index
+                "channel": raw_bi.ch_names,
+                "time": raw_bi.times * 1000,
+                "samplerate": raw_bi.info["sfreq"],                    # scalar coord (optional)
+            },
+            name="eeg",
+        ) 
+        # compare
+        results = compare_eeg_sources(
+            eeg_dict={"BIDS": eeg_bi_bids, "CMLReader": eeg_bi_cml},
+            subject=sub,
+            experiment=exp,
+            session=sess,
+            options=["strip_metadata", "compare_raw_signals", "compare_time_coords"]
+        )
+
+        results["df_raw"].to_csv(f"{out_path}df_raw_{sub}_{exp}_{sess}_bi.csv", index=False)
+        results["df_raw_summary"].to_csv(f"{out_path}df_raw_summary_{sub}_{exp}_{sess}_bi.csv", index=False)
+        results["df_time"].to_csv(f"{out_path}df_time_{sub}_{exp}_{sess}_bi.csv", index=False)
+        
+    else:
+        bids_path = BIDSPath(
+            subject=sub,
+            session=str(sess),
+            task=exp.lower(),
+            datatype="eeg",
+            root=bids_root,
+        )
+
+        raw = read_raw_bids(
+            bids_path,
+            verbose=True,
+        )
+
+        eeg_bids = xr.DataArray(
+            raw.get_data()[None, :, :],                           # -> (1, n_channels, n_times)
+            dims=("event", "channel", "time"),         # match eeg_cml dim names
+            coords={
+                "event": [0],                          # singleton event index
+                "channel": raw.ch_names,
+                "time": raw.times * 1000,
+                "samplerate": raw.info["sfreq"],                    # scalar coord (optional)
+            },
+            name="eeg",
+        ) 
+        # compare
+        results = compare_eeg_sources(
+            eeg_dict={"BIDS": eeg_bids, "CMLReader": eeg_cml},
+            subject=sub,
+            experiment=exp,
+            session=sess,
+            options=["strip_metadata", "compare_raw_signals", "compare_time_coords"]
+        )
+
+        results["df_raw"].to_csv(f"{out_path}df_raw_{sub}_{exp}_{sess}.csv", index=False)
+        results["df_raw_summary"].to_csv(f"{out_path}df_raw_summary_{sub}_{exp}_{sess}.csv", index=False)
+        results["df_time"].to_csv(f"{out_path}df_time_{sub}_{exp}_{sess}.csv", index=False)
     return results
-
-def _all_exist(paths):
-    return all(os.path.exists(p) for p in paths)
 
 def _dedupe_events_by_sample(df: pd.DataFrame, sample_col: str, *, keep="first") -> pd.DataFrame:
     if sample_col not in df.columns:
@@ -1600,7 +1773,7 @@ def _as_list(x):
         return list(x)
     return [x]
 
-def process_epoched_signals_by_type(
+def process_epoched_signals(
     sub,
     exp,
     sess,
@@ -1613,327 +1786,1117 @@ def process_epoched_signals_by_type(
     skip_if_exists=True,
     keep="first",
     verbose=False,
+    # NEW: iEEG options
+    localization=None,
+    montage=None,
+    compare_mono_bip_if_ieeg=True,
 ):
     """
-    Run epoch+compare separately for each event type, append results across types,
-    save and return the appended DataFrames.
+    Epoched comparison. For scalp EEG: compares one stream (datatype=eeg).
+    For iEEG (localization+montage provided): can compare BOTH monopolar and bipolar
+    CML vs BIDS streams per event type.
+
+    Outputs: one set of aggregated CSVs per (sub, exp, sess) *per acquisition* when iEEG.
     """
     os.makedirs(out_path, exist_ok=True)
 
-    # aggregated outputs (ONE set per sub/exp/sess)
-    out_raw = os.path.join(out_path, f"df_raw_{sub}_{exp}_{sess}.csv")
-    out_raw_summary = os.path.join(out_path, f"df_raw_summary_{sub}_{exp}_{sess}.csv")
-    out_time = os.path.join(out_path, f"df_time_{sub}_{exp}_{sess}.csv")
-    expected = [out_raw, out_raw_summary, out_time]
+    is_ieeg = is_intracranial(localization, montage)
+
+    # ---------- output paths ----------
+    def _paths_for(acq_tag: str):
+        out_raw = os.path.join(out_path, f"df_raw_{sub}_{exp}_{sess}_{acq_tag}.csv")
+        out_raw_summary = os.path.join(out_path, f"df_raw_summary_{sub}_{exp}_{sess}_{acq_tag}.csv")
+        out_time = os.path.join(out_path, f"df_time_{sub}_{exp}_{sess}_{acq_tag}.csv")
+        out_status = os.path.join(out_path, f"df_status_{sub}_{exp}_{sess}_{acq_tag}.csv")
+        return out_raw, out_raw_summary, out_time, out_status
+
+    acq_tags = ["eeg"]
+
+    if is_ieeg:
+        acq_tags = ["monopolar", "bipolar"]
+    else:
+        acq_tags = ["eeg"]
+
+    expected = []
+    for tag in acq_tags:
+        expected.extend(list(_paths_for(tag)[:3]))
 
     if skip_if_exists and _all_exist(expected):
         print("Files exist: skipped")
         return {"skipped": True, "reason": "outputs_exist", "paths": expected}
 
     # --------------------------
-    # CML: load events once
+    # CML: load events once (with ieeg metadata if needed)
     # --------------------------
-    cmlreader = cml.CMLReader(subject=sub, experiment=exp, session=sess)
+    cmlreader = cml.CMLReader(
+        subject=sub,
+        experiment=exp,
+        session=sess,
+        localization=localization,
+        montage=montage,
+    )
     evs_cml = cmlreader.load("events")
 
-    # decide which types to run
     if evs_types is None:
         types_to_run = sorted(pd.unique(evs_cml["type"]))
     else:
         types_to_run = sorted(set(_as_list(evs_types)))
-
     if len(types_to_run) == 0:
         raise ValueError("types_to_run is empty.")
 
     # --------------------------
-    # BIDS: load raw + annotations once
+    # BIDS: open raw(s) once
     # --------------------------
-    task = exp.lower()
-    bids_path = BIDSPath(
-        subject=sub,
-        session=str(sess),
-        task=task,
-        datatype="eeg",
-        root=bids_root,
-    )
+    if not is_ieeg:
+        base = BIDSPath(
+            subject=sub,
+            session=str(sess),
+            task=exp.lower(),
+            datatype="eeg",
+            root=bids_root,
+        )
+        raw_by_acq = {"eeg": read_raw_bids(base, verbose="ERROR")}
+    else:
+        base = BIDSPath(
+            subject=sub,
+            session=str(sess),
+            task=exp,
+            datatype="ieeg",
+            root=bids_root,
+            check=False,
+        )
+        raw_by_acq = {
+            "monopolar": read_raw_bids(
+                base.copy().update(acquisition="monopolar"),
+                verbose="ERROR",
+            ),
+            "bipolar": read_raw_bids(
+                base.copy().update(acquisition="bipolar"),
+                verbose="ERROR",
+            ),
+        }
 
-    raw_bids = read_raw_bids(bids_path)
-    raw_bids.set_channel_types({
-        "EXG1": "eog", "EXG2": "eog", "EXG3": "eog", "EXG4": "eog",
-        "EXG5": "misc", "EXG6": "misc", "EXG7": "misc", "EXG8": "misc",
-    })
 
-    events_all, event_id_all = mne.events_from_annotations(raw_bids)
-    sfreq = float(raw_bids.info["sfreq"])
+    # --------------------------
+    # BIDS: precompute events_from_annotations per raw stream
+    # (annotation codes can differ across acq in principle)
+    # --------------------------
+    ann_by_acq = {}
+    for acq_tag, raw in raw_by_acq.items():
+        events_all, event_id_all = mne.events_from_annotations(raw)
+        ann_by_acq[acq_tag] = dict(
+            raw=raw,
+            events_all=events_all,
+            event_id_all=event_id_all,
+            sfreq=float(raw.info["sfreq"]),
+        )
 
-    # collect per-type outputs
-    all_raw = []
-    all_raw_summary = []
-    all_time = []
+    # --------------------------
+    # iEEG: load CML schemes once (contacts + pairs) if requested
+    # --------------------------
+    cml_scheme_by_acq = {}
+    if is_ieeg:
+        contacts = cmlreader.load("contacts")
+        pairs = cmlreader.load("pairs")
+        cml_scheme_by_acq = {
+            "monopolar": contacts,
+            "bipolar": pairs,
+        }
 
-    # optional bookkeeping
-    per_type_status = []
-
-    for etype in types_to_run:
+    # --------------------------
+    # run per-acquisition
+    # --------------------------
+    results_all = {}
+    for acq_tag in acq_tags:
         if verbose:
-            print(f"[{sub} | {exp} | {sess}] type={etype}")
+            print(f"\n==== [{sub} | {exp} | {sess}] acq={acq_tag} ====")
 
+        out_raw, out_raw_summary, out_time, out_status = _paths_for(acq_tag)
+
+        all_raw = []
+        all_raw_summary = []
+        all_time = []
+        per_type_status = []
+
+        raw = ann_by_acq[acq_tag]["raw"]
+        events_all = ann_by_acq[acq_tag]["events_all"]
+        event_id_all = ann_by_acq[acq_tag]["event_id_all"]
+        sfreq = ann_by_acq[acq_tag]["sfreq"]
+
+        for etype in types_to_run:
+            if verbose:
+                print(f"  type={etype}")
+
+            try:
+                # --------------------------
+                # CML: filter + dedupe + epoch (per acquisition)
+                # --------------------------
+                evs_cml_t = evs_cml[evs_cml["type"] == etype].copy()
+                if evs_cml_t.empty:
+                    per_type_status.append((acq_tag, etype, "skip", "no_cml_events"))
+                    continue
+
+                evs_cml_t = _dedupe_events_by_sample(evs_cml_t, "eegoffset", keep=keep)
+
+                if is_ieeg and compare_mono_bip_if_ieeg:
+                    scheme = cml_scheme_by_acq[acq_tag]  # contacts or pairs
+                    eeg_cml = cmlreader.load_eeg(evs_cml_t, scheme=scheme, rel_start=tmin, rel_stop=tmax).to_ptsa()
+                else:
+                    eeg_cml = cmlreader.load_eeg(evs_cml_t, rel_start=tmin, rel_stop=tmax).to_ptsa()
+
+                # --------------------------
+                # BIDS: filter annotation codes for this type, dedupe by sample, epoch
+                # --------------------------
+                if etype not in event_id_all:
+                    per_type_status.append((acq_tag, etype, "skip", "etype_not_in_annotations"))
+                    del eeg_cml
+                    gc.collect()
+                    continue
+
+                code = event_id_all[etype]
+                events_filt = events_all[events_all[:, 2] == code]
+                if len(events_filt) == 0:
+                    per_type_status.append((acq_tag, etype, "skip", "no_bids_events"))
+                    del eeg_cml
+                    gc.collect()
+                    continue
+
+                # dedupe by sample (events_filt[:,0])
+                _, first_idx = np.unique(events_filt[:, 0], return_index=True)
+                events_filt = events_filt[np.sort(first_idx)]
+
+                epochs_bids = mne.Epochs(
+                    raw,
+                    events=events_filt,
+                    event_id={etype: code},
+                    tmin=tmin / 1000.0,
+                    tmax=tmax / 1000.0,
+                    baseline=None,
+                    preload=True,
+                )
+
+                # pick channels
+                if not is_ieeg:
+                    picks = mne.pick_types(epochs_bids.info, eeg=True, eog=False, misc=False)
+                else:
+                    # iEEG: keep ieeg/seeg/ecog + exclude misc/eog if present
+                    picks = mne.pick_types(epochs_bids.info, ieeg=True, eeg=False, eog=False, misc=False)
+                    if len(picks) == 0:
+                        # sometimes BIDS iEEG channels are typed as "seeg"/"ecog" but still count as ieeg; pick_types handles that
+                        picks = np.arange(len(epochs_bids.ch_names))
+                epochs_bids = epochs_bids.pick(picks)
+
+                # metadata aligned to events_filt
+                meta = pd.DataFrame({
+                    "sample": events_filt[:, 0].astype(int),
+                    "trial_type": [etype] * len(events_filt),
+                })
+                meta["onset"] = meta["sample"] / sfreq
+
+                eeg_bids = TimeSeries.from_mne_epochs(epochs_bids, meta)
+                eeg_bids = eeg_bids.assign_coords(time=eeg_bids["time"] * 1000.0)
+                eeg_bids["time"].attrs["units"] = "ms"
+
+                # --------------------------
+                # Compare
+                # --------------------------
+                res = compare_eeg_sources(
+                    eeg_dict={"BIDS": eeg_bids, "CMLReader": eeg_cml},
+                    subject=sub,
+                    experiment=exp,
+                    session=sess,
+                    options=["strip_metadata", "compare_raw_signals", "compare_time_coords"],
+                )
+
+                # append dfs; add tags
+                if res.get("df_raw") is not None and not res["df_raw"].empty:
+                    df = res["df_raw"].copy()
+                    df["event_type"] = etype
+                    df["acquisition"] = acq_tag
+                    all_raw.append(df)
+
+                if res.get("df_raw_summary") is not None and not res["df_raw_summary"].empty:
+                    df = res["df_raw_summary"].copy()
+                    df["event_type"] = etype
+                    df["acquisition"] = acq_tag
+                    all_raw_summary.append(df)
+
+                if res.get("df_time") is not None and not res["df_time"].empty:
+                    df = res["df_time"].copy()
+                    df["event_type"] = etype
+                    df["acquisition"] = acq_tag
+                    all_time.append(df)
+
+                per_type_status.append((acq_tag, etype, "ok", ""))
+
+            except Exception as e:
+                per_type_status.append((acq_tag, etype, "fail", repr(e)))
+
+            finally:
+                for name in ("epochs_bids", "eeg_bids", "eeg_cml", "res", "events_filt", "meta"):
+                    if name in locals():
+                        try:
+                            del locals()[name]
+                        except Exception:
+                            pass
+                gc.collect()
+
+        # save per acquisition
+        df_raw_all = pd.concat(all_raw, ignore_index=True) if all_raw else pd.DataFrame()
+        df_raw_summary_all = pd.concat(all_raw_summary, ignore_index=True) if all_raw_summary else pd.DataFrame()
+        df_time_all = pd.concat(all_time, ignore_index=True) if all_time else pd.DataFrame()
+        df_status = pd.DataFrame(per_type_status, columns=["acquisition", "event_type", "status", "detail"])
+
+        df_raw_all.to_csv(out_raw, index=False)
+        df_raw_summary_all.to_csv(out_raw_summary, index=False)
+        df_time_all.to_csv(out_time, index=False)
+        df_status.to_csv(out_status, index=False)
+
+        results_all[acq_tag] = dict(
+            df_raw=df_raw_all,
+            df_raw_summary=df_raw_summary_all,
+            df_time=df_time_all,
+            per_type_status=df_status,
+            paths=[out_raw, out_raw_summary, out_time, out_status],
+        )
+
+    # close raws
+    for acq_tag, raw in raw_by_acq.items():
         try:
-            # --------------------------
-            # CML: filter to this type + dedupe by eegoffset, then epoch
-            # --------------------------
-            evs_cml_t = evs_cml[evs_cml["type"] == etype].copy()
-            if evs_cml_t.empty:
-                per_type_status.append((etype, "skip", "no_cml_events"))
-                continue
+            raw.close()
+        except Exception:
+            pass
 
-            evs_cml_t = _dedupe_events_by_sample(evs_cml_t, "eegoffset", keep=keep)
+    return results_all
 
-            eeg_cml = cmlreader.load_eeg(evs_cml_t, rel_start=tmin, rel_stop=tmax).to_ptsa()
+# def process_epoched_signals(
+#     sub,
+#     exp,
+#     sess,
+#     evs_types,
+#     tmin,
+#     tmax,
+#     bids_root,
+#     out_path,
+#     *,
+#     skip_if_exists=True,
+#     keep="first",
+#     verbose=False,
+# ):
+#     """
+#     Run epoch+compare separately for each event type, append results across types,
+#     save and return the appended DataFrames.
+#     """
+#     os.makedirs(out_path, exist_ok=True)
 
-            # --------------------------
-            # BIDS: filter annotation labels/codes for this type, dedupe by sample, epoch
-            # --------------------------
-            if etype not in event_id_all:
-                per_type_status.append((etype, "skip", "etype_not_in_annotations"))
-                # free CML epoch before continue
-                del eeg_cml
-                gc.collect()
-                continue
+#     # aggregated outputs (ONE set per sub/exp/sess)
+#     out_raw = os.path.join(out_path, f"df_raw_{sub}_{exp}_{sess}.csv")
+#     out_raw_summary = os.path.join(out_path, f"df_raw_summary_{sub}_{exp}_{sess}.csv")
+#     out_time = os.path.join(out_path, f"df_time_{sub}_{exp}_{sess}.csv")
+#     expected = [out_raw, out_raw_summary, out_time]
 
-            filtered_event_id = {etype: event_id_all[etype]}
-            code = filtered_event_id[etype]
+#     if skip_if_exists and _all_exist(expected):
+#         print("Files exist: skipped")
+#         return {"skipped": True, "reason": "outputs_exist", "paths": expected}
 
-            events_filt = events_all[events_all[:, 2] == code]
-            if len(events_filt) == 0:
-                per_type_status.append((etype, "skip", "no_bids_events"))
-                del eeg_cml
-                gc.collect()
-                continue
+#     # --------------------------
+#     # CML: load events once
+#     # --------------------------
+#     cmlreader = cml.CMLReader(subject=sub, experiment=exp, session=sess)
+#     evs_cml = cmlreader.load("events")
 
-            # dedupe by sample
-            _, first_idx = np.unique(events_filt[:, 0], return_index=True)
-            events_filt = events_filt[np.sort(first_idx)]
+#     # decide which types to run
+#     if evs_types is None:
+#         types_to_run = sorted(pd.unique(evs_cml["type"]))
+#     else:
+#         types_to_run = sorted(set(_as_list(evs_types)))
 
-            epochs_bids = mne.Epochs(
-                raw_bids,
-                events=events_filt,
-                event_id=filtered_event_id,
-                tmin=tmin / 1000.0,
-                tmax=tmax / 1000.0,
-                baseline=None,
-                preload=True,
-            )
+#     if len(types_to_run) == 0:
+#         raise ValueError("types_to_run is empty.")
 
-            picks_eeg = mne.pick_types(epochs_bids.info, eeg=True, eog=False, misc=False)
-            epochs_bids = epochs_bids.pick(picks_eeg)
+#     # --------------------------
+#     # BIDS: load raw + annotations once
+#     # --------------------------
+#     task = exp.lower()
+#     bids_path = BIDSPath(
+#         subject=sub,
+#         session=str(sess),
+#         task=task,
+#         datatype="eeg",
+#         root=bids_root,
+#     )
 
-            # metadata aligned to events_filt
-            meta = pd.DataFrame({
-                "sample": events_filt[:, 0].astype(int),
-                "trial_type": [etype] * len(events_filt),
-            })
-            meta["onset"] = meta["sample"] / sfreq
+#     raw_bids = read_raw_bids(bids_path)
+#     raw_bids.set_channel_types({
+#         "EXG1": "eog", "EXG2": "eog", "EXG3": "eog", "EXG4": "eog",
+#         "EXG5": "misc", "EXG6": "misc", "EXG7": "misc", "EXG8": "misc",
+#     })
 
-            eeg_bids = TimeSeries.from_mne_epochs(epochs_bids, meta)
-            eeg_bids = eeg_bids.assign_coords(time=eeg_bids["time"] * 1000.0)
-            eeg_bids["time"].attrs["units"] = "ms"
+#     events_all, event_id_all = mne.events_from_annotations(raw_bids)
+#     sfreq = float(raw_bids.info["sfreq"])
 
-            # --------------------------
-            # Compare
-            # --------------------------
-            res = compare_eeg_sources(
-                eeg_dict={"BIDS": eeg_bids, "CMLReader": eeg_cml},
-                subject=sub,
-                experiment=exp,
-                session=sess,
-                options=["strip_metadata", "compare_raw_signals", "compare_time_coords"],
-            )
+#     # collect per-type outputs
+#     all_raw = []
+#     all_raw_summary = []
+#     all_time = []
 
-            # append dfs; add event type column so you can stratify later
-            if res.get("df_raw") is not None and not res["df_raw"].empty:
-                df = res["df_raw"].copy()
-                df["event_type"] = etype
-                all_raw.append(df)
+#     # optional bookkeeping
+#     per_type_status = []
 
-            if res.get("df_raw_summary") is not None and not res["df_raw_summary"].empty:
-                df = res["df_raw_summary"].copy()
-                df["event_type"] = etype
-                all_raw_summary.append(df)
+#     for etype in types_to_run:
+#         if verbose:
+#             print(f"[{sub} | {exp} | {sess}] type={etype}")
 
-            if res.get("df_time") is not None and not res["df_time"].empty:
-                df = res["df_time"].copy()
-                df["event_type"] = etype
-                all_time.append(df)
+#         try:
+#             # --------------------------
+#             # CML: filter to this type + dedupe by eegoffset, then epoch
+#             # --------------------------
+#             evs_cml_t = evs_cml[evs_cml["type"] == etype].copy()
+#             if evs_cml_t.empty:
+#                 per_type_status.append((etype, "skip", "no_cml_events"))
+#                 continue
 
-            per_type_status.append((etype, "ok", ""))
+#             evs_cml_t = _dedupe_events_by_sample(evs_cml_t, "eegoffset", keep=keep)
 
-        except Exception as e:
-            per_type_status.append((etype, "fail", repr(e)))
+#             eeg_cml = cmlreader.load_eeg(evs_cml_t, rel_start=tmin, rel_stop=tmax).to_ptsa()
 
-        finally:
-            # free big objects per type
-            for name in ("epochs_bids", "eeg_bids", "eeg_cml", "res", "events_filt", "meta"):
-                if name in locals():
-                    try:
-                        del locals()[name]
-                    except Exception:
-                        pass
-            gc.collect()
+#             # --------------------------
+#             # BIDS: filter annotation labels/codes for this type, dedupe by sample, epoch
+#             # --------------------------
+#             if etype not in event_id_all:
+#                 per_type_status.append((etype, "skip", "etype_not_in_annotations"))
+#                 # free CML epoch before continue
+#                 del eeg_cml
+#                 gc.collect()
+#                 continue
 
-    # done with BIDS raw
-    try:
-        raw_bids.close()
-    except Exception:
-        pass
-    del raw_bids
-    gc.collect()
+#             filtered_event_id = {etype: event_id_all[etype]}
+#             code = filtered_event_id[etype]
 
-    # concatenate and save
-    df_raw_all = pd.concat(all_raw, ignore_index=True) if all_raw else pd.DataFrame()
-    df_raw_summary_all = pd.concat(all_raw_summary, ignore_index=True) if all_raw_summary else pd.DataFrame()
-    df_time_all = pd.concat(all_time, ignore_index=True) if all_time else pd.DataFrame()
+#             events_filt = events_all[events_all[:, 2] == code]
+#             if len(events_filt) == 0:
+#                 per_type_status.append((etype, "skip", "no_bids_events"))
+#                 del eeg_cml
+#                 gc.collect()
+#                 continue
 
-    df_raw_all.to_csv(out_raw, index=False)
-    df_raw_summary_all.to_csv(out_raw_summary, index=False)
-    df_time_all.to_csv(out_time, index=False)
+#             # dedupe by sample
+#             _, first_idx = np.unique(events_filt[:, 0], return_index=True)
+#             events_filt = events_filt[np.sort(first_idx)]
 
-    return {
-        "df_raw": df_raw_all,
-        "df_raw_summary": df_raw_summary_all,
-        "df_time": df_time_all,
-        "per_type_status": pd.DataFrame(per_type_status, columns=["event_type", "status", "detail"]),
-        "paths": expected,
-    }
+#             epochs_bids = mne.Epochs(
+#                 raw_bids,
+#                 events=events_filt,
+#                 event_id=filtered_event_id,
+#                 tmin=tmin / 1000.0,
+#                 tmax=tmax / 1000.0,
+#                 baseline=None,
+#                 preload=True,
+#             )
 
+#             picks_eeg = mne.pick_types(epochs_bids.info, eeg=True, eog=False, misc=False)
+#             epochs_bids = epochs_bids.pick(picks_eeg)
+
+#             # metadata aligned to events_filt
+#             meta = pd.DataFrame({
+#                 "sample": events_filt[:, 0].astype(int),
+#                 "trial_type": [etype] * len(events_filt),
+#             })
+#             meta["onset"] = meta["sample"] / sfreq
+
+#             eeg_bids = TimeSeries.from_mne_epochs(epochs_bids, meta)
+#             eeg_bids = eeg_bids.assign_coords(time=eeg_bids["time"] * 1000.0)
+#             eeg_bids["time"].attrs["units"] = "ms"
+
+#             # --------------------------
+#             # Compare
+#             # --------------------------
+#             res = compare_eeg_sources(
+#                 eeg_dict={"BIDS": eeg_bids, "CMLReader": eeg_cml},
+#                 subject=sub,
+#                 experiment=exp,
+#                 session=sess,
+#                 options=["strip_metadata", "compare_raw_signals", "compare_time_coords"],
+#             )
+
+#             # append dfs; add event type column so you can stratify later
+#             if res.get("df_raw") is not None and not res["df_raw"].empty:
+#                 df = res["df_raw"].copy()
+#                 df["event_type"] = etype
+#                 all_raw.append(df)
+
+#             if res.get("df_raw_summary") is not None and not res["df_raw_summary"].empty:
+#                 df = res["df_raw_summary"].copy()
+#                 df["event_type"] = etype
+#                 all_raw_summary.append(df)
+
+#             if res.get("df_time") is not None and not res["df_time"].empty:
+#                 df = res["df_time"].copy()
+#                 df["event_type"] = etype
+#                 all_time.append(df)
+
+#             per_type_status.append((etype, "ok", ""))
+
+#         except Exception as e:
+#             per_type_status.append((etype, "fail", repr(e)))
+
+#         finally:
+#             # free big objects per type
+#             for name in ("epochs_bids", "eeg_bids", "eeg_cml", "res", "events_filt", "meta"):
+#                 if name in locals():
+#                     try:
+#                         del locals()[name]
+#                     except Exception:
+#                         pass
+#             gc.collect()
+
+#     # done with BIDS raw
+#     try:
+#         raw_bids.close()
+#     except Exception:
+#         pass
+#     del raw_bids
+#     gc.collect()
+
+#     # concatenate and save
+#     df_raw_all = pd.concat(all_raw, ignore_index=True) if all_raw else pd.DataFrame()
+#     df_raw_summary_all = pd.concat(all_raw_summary, ignore_index=True) if all_raw_summary else pd.DataFrame()
+#     df_time_all = pd.concat(all_time, ignore_index=True) if all_time else pd.DataFrame()
+
+#     df_raw_all.to_csv(out_raw, index=False)
+#     df_raw_summary_all.to_csv(out_raw_summary, index=False)
+#     df_time_all.to_csv(out_time, index=False)
+
+#     return {
+#         "df_raw": df_raw_all,
+#         "df_raw_summary": df_raw_summary_all,
+#         "df_time": df_time_all,
+#         "per_type_status": pd.DataFrame(per_type_status, columns=["event_type", "status", "detail"]),
+#         "paths": expected,
+#     }
+
+
+# ----------------------------
+# Compare Montage
+# ----------------------------
 def _all_exist(paths):
     return all(os.path.exists(p) for p in paths)
 
-def load_bids_events(sub, exp, sess, bids_root, *, return_path=False):
-    """
-    Load BIDS events.tsv trying both ieeg/ and eeg/ folders.
 
-    Tries:
-      datatype: ieeg -> eeg
-      task variants: exp, exp.lower(), exp.upper()
+def load_electrodes_any_space(base: BIDSPath):
+    """
+    FIRST OPTION:
+    Prefer MNI electrodes.tsv if it exists, otherwise fall back to Talairach electrodes.tsv,
+    otherwise try electrodes.tsv with no space entity.
 
     Returns:
-      df (or (df, path) if return_path=True), or None if not found.
+      (elec_df, elec_space) where elec_space in {"MNI152NLin6ASym", "Talairach", "unknown"}.
     """
-    datatypes = ("ieeg", "eeg")
-    task_variants = []
-    for t in (exp, str(exp).lower(), str(exp).upper()):
-        if t not in task_variants:
-            task_variants.append(t)
+    # prefer MNI
+    p_mni = base.copy().update(suffix="electrodes", extension=".tsv", space="MNI152NLin6ASym").fpath
+    if p_mni and Path(p_mni).exists():
+        return pd.read_csv(p_mni, sep="\t"), "MNI152NLin6ASym"
 
-    for datatype in datatypes:
-        for task in task_variants:
-            bp = BIDSPath(
-                subject=sub,
-                session=str(sess),
-                task=task,
-                datatype=datatype,
-                suffix="events",
-                extension=".tsv",
-                root=bids_root,
-                check=False,
-            )
-            fpath = bp.fpath
-            if fpath is not None and os.path.exists(fpath):
-                df = pd.read_csv(fpath, sep="\t")
-                return (df, fpath) if return_path else df
+    # fallback Talairach
+    p_tal = base.copy().update(suffix="electrodes", extension=".tsv", space="Talairach").fpath
+    if p_tal and Path(p_tal).exists():
+        return pd.read_csv(p_tal, sep="\t"), "Talairach"
 
-    return None
+    # last resort: no space entity
+    p_nospace = base.copy().update(suffix="electrodes", extension=".tsv").fpath
+    if p_nospace and Path(p_nospace).exists():
+        return pd.read_csv(p_nospace, sep="\t"), "unknown"
 
-def process_events(sub, exp, sess, evs_types, bids_root, out_path, *, skip_if_exists=True):
+    raise FileNotFoundError(f"No electrodes.tsv found for {base}")
+
+def dedupe_electrodes_keep_first(elec: pd.DataFrame, label_col="label"):
+    """
+    Make labels unique so we can set_index + reindex safely.
+    If duplicates exist, keep the first occurrence.
+    """
+    if label_col not in elec.columns:
+        return elec
+    s = elec[label_col].astype("string").str.strip()
+    dup = s.duplicated(keep=False)
+    if dup.any():
+        vals = s[dup].unique().tolist()
+        print(f"[WARN] electrodes has duplicate labels (keeping first). Example labels: {vals[:20]}")
+    elec2 = elec.copy()
+    elec2[label_col] = s
+    elec2 = elec2.drop_duplicates(subset=[label_col], keep="first")
+    return elec2
+
+# ----------------------------
+# BIDS -> contacts (space-aware)
+# ----------------------------
+def prep_bids_contacts_from_electrodes(elec: pd.DataFrame, *, elec_space: str):
+    """
+    Build a contacts-like dataframe from a BIDS electrodes.tsv dataframe.
+
+    Output columns:
+      - label
+      - mni.x, mni.y, mni.z
+      - type  (mapped to G/D/S)
+      - ind.region
+      - tal.x, tal.y, tal.z
+
+    Space rule:
+      - If elec_space == "MNI152NLin6ASym": electrodes x/y/z are MNI -> mni.x/y/z; tal.* set to NA if absent
+      - If elec_space == "Talairach": electrodes x/y/z are Talairach -> tal.x/y/z; mni.* set to NA
+    """
+    type_map = {"grid": "G", "depth": "D", "strip": "S", "gird": "G"}
+
+    out = elec.copy()
+
+    # label
+    if "name" in out.columns:
+        out = out.rename(columns={"name": "label"})
+    elif "label" not in out.columns:
+        out["label"] = pd.NA
+    out["label"] = out["label"].astype("string").str.strip()
+
+    # type/group
+    # your dataset appears to use "type" in electrodes.tsv; fall back to "group" if present
+    src_type = None
+    for cand in ["type", "group", "Group", "electrode_type", "contact_type"]:
+        if cand in out.columns:
+            src_type = cand
+            break
+
+    if src_type is None:
+        out["type"] = pd.NA
+    else:
+        out["type"] = (
+            out[src_type]
+            .astype("string")
+            .str.strip()
+            .str.lower()
+            .replace({"gird": "grid"})
+            .map(type_map)
+        )
+
+    # coordinates
+    if elec_space == "MNI152NLin6ASym":
+        # x/y/z are MNI
+        out = out.rename(columns={"x": "mni.x", "y": "mni.y", "z": "mni.z"})
+        for c in ["tal.x", "tal.y", "tal.z"]:
+            if c not in out.columns:
+                out[c] = pd.NA
+    elif elec_space == "Talairach":
+        # x/y/z are Talairach
+        out = out.rename(columns={"x": "tal.x", "y": "tal.y", "z": "tal.z"})
+        for c in ["mni.x", "mni.y", "mni.z"]:
+            if c not in out.columns:
+                out[c] = pd.NA
+    else:
+        # unknown: don't guess
+        for c in ["mni.x", "mni.y", "mni.z", "tal.x", "tal.y", "tal.z"]:
+            if c not in out.columns:
+                out[c] = pd.NA
+
+    # region
+    if "ind.region" not in out.columns:
+        out["ind.region"] = pd.NA
+
+    cols = ["label", "mni.x", "mni.y", "mni.z", "type", "ind.region", "tal.x", "tal.y", "tal.z"]
+    for c in cols:
+        if c not in out.columns:
+            out[c] = pd.NA
+    return out[cols]
+
+# ----------------------------
+# BIDS -> pairs (space-aware)
+# ----------------------------
+def prep_bids_pairs_from_electrodes_and_bipolar_channels(
+    elec: pd.DataFrame,
+    ch_bip: pd.DataFrame,
+    *,
+    elec_space: str,
+    label_col_channels: str = "name",
+    elec_name_col: str = "name",
+    group_col_candidates=("type", "group", "Group", "electrode_type", "contact_type"),
+    region_col: str = "ind.region",
+    type_map: dict = None,
+    region_mismatch_value: str = "mismatch",
+) -> pd.DataFrame:
+    """
+    Prepare bipolar pairs-like df using:
+      - ch_bip: bipolar channels.tsv (name contains "A-B")
+      - elec: electrodes.tsv (space-aware)
+
+    Output columns:
+      - label
+      - mni.x, mni.y, mni.z (if available; else NA)
+      - tal.x, tal.y, tal.z (if available; else NA)
+      - type1, type2
+      - ind.region
+      - contact1, contact2
+    """
+    if type_map is None:
+        type_map = {"grid": "G", "depth": "D", "strip": "S", "gird": "G"}
+
+    def _norm_str(s):
+        if pd.isna(s):
+            return pd.NA
+        return str(s).strip()
+
+    def _norm_group(g):
+        if pd.isna(g):
+            return pd.NA
+        g2 = str(g).strip().lower()
+        g2 = "grid" if g2 == "gird" else g2
+        return type_map.get(g2, pd.NA)
+
+    def _split_pair(label: str):
+        if label is None or pd.isna(label):
+            return (pd.NA, pd.NA)
+        s = str(label).strip()
+        if "-" in s:
+            parts = s.split("-")
+            if len(parts) == 2:
+                return parts[0].strip(), parts[1].strip()
+        return (pd.NA, pd.NA)
+
+    def _midpoint(a, b):
+        a = pd.to_numeric(a, errors="coerce").to_numpy()
+        b = pd.to_numeric(b, errors="coerce").to_numpy()
+        return (a + b) / 2.0
+
+    # ---- normalize electrodes table
+    elec2 = elec.copy()
+    if elec_name_col in elec2.columns and elec_name_col != "label":
+        elec2 = elec2.rename(columns={elec_name_col: "label"})
+    if "label" not in elec2.columns:
+        elec2["label"] = pd.NA
+    elec2["label"] = elec2["label"].astype("string").str.strip()
+
+    # pick the group/type column (your electrodes often use "type")
+    group_col = None
+    for cand in group_col_candidates:
+        if cand in elec2.columns:
+            group_col = cand
+            break
+
+    # create standardized coordinate columns based on elec_space
+    if elec_space == "MNI152NLin6ASym":
+        # x/y/z are MNI
+        if "x" in elec2.columns: elec2["mni.x"] = elec2["x"]
+        if "y" in elec2.columns: elec2["mni.y"] = elec2["y"]
+        if "z" in elec2.columns: elec2["mni.z"] = elec2["z"]
+        for c in ["tal.x", "tal.y", "tal.z"]:
+            if c not in elec2.columns:
+                elec2[c] = pd.NA
+    elif elec_space == "Talairach":
+        # x/y/z are Talairach
+        if "x" in elec2.columns: elec2["tal.x"] = elec2["x"]
+        if "y" in elec2.columns: elec2["tal.y"] = elec2["y"]
+        if "z" in elec2.columns: elec2["tal.z"] = elec2["z"]
+        for c in ["mni.x", "mni.y", "mni.z"]:
+            if c not in elec2.columns:
+                elec2[c] = pd.NA
+    else:
+        for c in ["mni.x", "mni.y", "mni.z", "tal.x", "tal.y", "tal.z"]:
+            if c not in elec2.columns:
+                elec2[c] = pd.NA
+
+    # ensure region exists
+    if region_col not in elec2.columns:
+        elec2[region_col] = pd.NA
+
+    # de-dup labels so we can reindex
+    elec2 = dedupe_electrodes_keep_first(elec2, label_col="label")
+    elec2_idx = elec2.set_index("label", drop=False)
+
+    # ---- bipolar labels table
+    ch2 = ch_bip.copy()
+    ch2 = ch2.rename(columns={label_col_channels: "label"})
+    ch2["label"] = ch2["label"].apply(_norm_str)
+
+    c1c2 = ch2["label"].apply(_split_pair)
+    ch2["contact1"] = [a for a, b in c1c2]
+    ch2["contact2"] = [b for a, b in c1c2]
+
+    # lookup electrodes by label (safe because we deduped)
+    e1 = elec2_idx.reindex(ch2["contact1"].astype("string"))
+    e2 = elec2_idx.reindex(ch2["contact2"].astype("string"))
+
+    out = pd.DataFrame({"label": ch2["label"].astype("string")})
+
+    # ---- midpoint coords (both MNI and TAL columns exist; may be all-NA depending on space)
+    out["mni.x"] = _midpoint(e1.get("mni.x"), e2.get("mni.x"))
+    out["mni.y"] = _midpoint(e1.get("mni.y"), e2.get("mni.y"))
+    out["mni.z"] = _midpoint(e1.get("mni.z"), e2.get("mni.z"))
+
+    out["tal.x"] = _midpoint(e1.get("tal.x"), e2.get("tal.x"))
+    out["tal.y"] = _midpoint(e1.get("tal.y"), e2.get("tal.y"))
+    out["tal.z"] = _midpoint(e1.get("tal.z"), e2.get("tal.z"))
+
+    # ---- type1/type2 (positional)
+    if group_col is not None:
+        out["type1"] = e1[group_col].apply(_norm_group).to_numpy()
+        out["type2"] = e2[group_col].apply(_norm_group).to_numpy()
+    else:
+        out["type1"] = pd.NA
+        out["type2"] = pd.NA
+
+    # ---- ind.region (positional)
+    r1 = e1[region_col].astype("string").to_numpy() if region_col in e1.columns else np.array([pd.NA]*len(out), dtype=object)
+    r2 = e2[region_col].astype("string").to_numpy() if region_col in e2.columns else np.array([pd.NA]*len(out), dtype=object)
+
+    same = (r1 == r2) & (~pd.isna(r1)) & (~pd.isna(r2))
+    ind_region = np.array([pd.NA] * len(out), dtype=object)
+    ind_region[same] = r1[same]
+    ind_region[(~same) & (~pd.isna(r1)) & (~pd.isna(r2))] = region_mismatch_value
+    out["ind.region"] = ind_region
+
+    # keep contacts for debugging
+    out["contact1"] = ch2["contact1"].astype("string")
+    out["contact2"] = ch2["contact2"].astype("string")
+
+    cols = [
+        "label",
+        "mni.x", "mni.y", "mni.z",
+        "tal.x", "tal.y", "tal.z",
+        "type1", "type2",
+        "ind.region",
+        "contact1", "contact2",
+    ]
+    for c in cols:
+        if c not in out.columns:
+            out[c] = pd.NA
+    return out[cols]
+
+# ----------------------------
+# MAIN: montage processing
+# ----------------------------
+# def process_montage(
+#     sub, exp, sess, montage, localization,
+#     bids_root, out_path,
+#     *,
+#     skip_if_exists=True,
+#     atol_coords=1e-3,
+#     rtol_coords=0.0,
+# ):
+#     os.makedirs(out_path, exist_ok=True)
+
+#     out_montage_summary = os.path.join(out_path, f"df_montage_summary_{sub}_{exp}_{sess}.csv")
+#     expected = [out_montage_summary]
+#     if skip_if_exists and _all_exist(expected):
+#         return {"skipped": True, "reason": "outputs_exist", "paths": expected}
+
+#     # ---- Load CML
+#     try:
+#         import cmlreaders as cml
+#         cmlreader = cml.CMLReader(
+#             subject=sub, experiment=exp, session=sess,
+#             montage=montage, localization=localization
+#         )
+#         pairs_cml = cmlreader.load("pairs")
+#         contact_cml = cmlreader.load("contacts")
+#     except Exception as e:
+#         print(f"Failed to load CML for {sub} | {exp} | {sess}: {e}")
+#         return {"skipped": True, "reason": "cml_load_failed", "error": str(e)}
+
+#     # ---- BIDS base
+#     base = BIDSPath(
+#         subject=sub,
+#         session=str(sess),
+#         task=exp,
+#         datatype="ieeg",
+#         root=bids_root,
+#         check=False,
+#     )
+
+    
+#     # ---- comparisons (two independent try/except blocks)
+#     results_all = {}
+#     # CONTACTS
+#     try:
+#          # ---- electrodes: first option (MNI preferred; else Talairach)
+#         elec, elec_space = load_electrodes_any_space(base)
+#         print(f"[INFO] Using electrodes space={elec_space} for {sub} | {exp} | {sess}")
+
+#         # contacts df (space-aware)
+#         contact_bids = prep_bids_contacts_from_electrodes(elec, elec_space=elec_space)
+#         res_contacts = compare_shared_columns(
+#             contact_cml, "CML",
+#             contact_bids, "BIDS",
+#             options=["tolerant_numeric", "return_aligned", "print_col_summary"],
+#             rtol=rtol_coords,
+#             atol=atol_coords,
+#             sort_keys=["label"],
+#         )
+
+#         res_contacts["df_summary"].to_csv(
+#             os.path.join(out_path, f"df_contacts_summary_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+#         res_contacts["df_column_summary"].to_csv(
+#             os.path.join(out_path, f"df_contacts_column_summary_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+#         res_contacts["df_mismatches"].to_csv(
+#             os.path.join(out_path, f"df_contacts_mismatches_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+
+#         results_all["contacts"] = res_contacts
+#         print(f"[OK] Contacts comparison finished for {sub} | {exp} | {sess}")
+
+#     except Exception as e:
+#         print(f"[FAIL] Contacts comparison failed for {sub} | {exp} | {sess}: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         results_all["contacts"] = {"skipped": True, "error": str(e)}
+
+#     # PAIRS
+#     try:
+#             # bipolar channels
+#         ch_bip = _safe_read_tsv(
+#             base.copy().update(acquisition="bipolar", suffix="channels", extension=".tsv").fpath
+#         )
+#         # pairs df (space-aware)
+#         pairs_bids = prep_bids_pairs_from_electrodes_and_bipolar_channels(
+#             elec=elec,
+#             ch_bip=ch_bip,
+#             elec_space=elec_space,
+#             label_col_channels="name",
+#             elec_name_col="name",
+#             region_col="ind.region",
+#         )
+
+#         res_pairs = compare_shared_columns(
+#             pairs_cml, "CML",
+#             pairs_bids, "BIDS",
+#             options=["tolerant_numeric", "return_aligned"],
+#             rtol=rtol_coords,
+#             atol=atol_coords,
+#             sort_keys=["label"],
+#         )
+
+#         res_pairs["df_summary"].to_csv(
+#             os.path.join(out_path, f"df_pairs_summary_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+#         res_pairs["df_column_summary"].to_csv(
+#             os.path.join(out_path, f"df_pairs_column_summary_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+#         res_pairs["df_mismatches"].to_csv(
+#             os.path.join(out_path, f"df_pairs_mismatches_{sub}_{exp}_{sess}.csv"),
+#             index=False,
+#         )
+
+#         results_all["pairs"] = res_pairs
+#         print(f"[OK] Pairs comparison finished for {sub} | {exp} | {sess}")
+
+#     except Exception as e:
+#         print(f"[FAIL] Pairs comparison failed for {sub} | {exp} | {sess}: {e}")
+#         import traceback
+#         traceback.print_exc()
+#         results_all["pairs"] = {"skipped": True, "error": str(e)}
+
+#     # optional montage-level summary marker
+#     pd.DataFrame([{
+#         "subject": sub,
+#         "experiment": exp,
+#         "session": sess,
+#         "electrodes_space_used": elec_space,
+#         "contacts_ok": bool(results_all.get("contacts", {}).get("ok", False)) if isinstance(results_all.get("contacts"), dict) else False,
+#         "pairs_ok": bool(results_all.get("pairs", {}).get("ok", False)) if isinstance(results_all.get("pairs"), dict) else False,
+#     }]).to_csv(out_montage_summary, index=False)
+
+#     return results_all
+
+def process_montage(
+    sub, exp, sess, montage, localization,
+    bids_root, out_path,
+    *,
+    skip_if_exists=True,
+    atol_coords=1e-3,
+    rtol_coords=0.0,
+):
     os.makedirs(out_path, exist_ok=True)
-    out_behavior_summary = os.path.join(out_path, f"df_behavior_summary_{sub}_{exp}_{sess}.csv")
-    
-    expected = [out_behavior_summary]
-    if skip_if_exists and _all_exist(expected):
-        return {"skipped": True, "reason": "outputs_exist", "paths": expected}
-    
-    # Load CML events
+
+    out_montage_summary = os.path.join(
+        out_path, f"df_montage_summary_{sub}_{exp}_{sess}.csv"
+    )
+
+    if skip_if_exists and os.path.exists(out_montage_summary):
+        return {"skipped": True, "reason": "outputs_exist"}
+
+    # --------------------------------------------------
+    # Load CML
+    # --------------------------------------------------
     try:
-        cmlreader = cml.CMLReader(subject=sub, experiment=exp, session=sess)
-        evs_cml = cmlreader.load('events')
-        # print(evs_cml.columns)
-        # print(evs_cml)
+        import cmlreaders as cml
+        cmlreader = cml.CMLReader(
+            subject=sub,
+            experiment=exp,
+            session=sess,
+            montage=montage,
+            localization=localization,
+        )
+        pairs_cml = cmlreader.load("pairs")
+        contact_cml = cmlreader.load("contacts")
+
     except Exception as e:
-        print(f"Failed to load CML events for {sub} | {exp} | {sess}: {e}")
+        print(f"[FAIL] CML load failed for {sub} | {exp} | {sess}: {e}")
         return {"skipped": True, "reason": "cml_load_failed", "error": str(e)}
-    
-    evs_types_set = set(evs_types) if evs_types is not None else set(evs_cml["type"].unique())
-    # print(evs_cml.columns)
-    if exp == "ValueCourier":
-        evs_cml = fix_evs_cml(evs_cml)
-    # print(evs_cml.columns)
-    
-    filtered_evs_cml = evs_cml[evs_cml["type"].isin(evs_types_set)]
-    # print(filtered_evs_cml.columns)
-    
-    # Load BIDS events
-    tmp = load_bids_events(sub, exp, sess, bids_root, return_path=True)
-    if tmp is None:
-        print(f"Skipping {sub} | {exp} | {sess}: BIDS events file not found in eeg/ or ieeg/")
-        return {"skipped": True, "reason": "bids_events_not_found"}
 
-    evs_bids, bids_events_path = tmp
-    print(f"[BIDS] Loaded events from: {bids_events_path}")
-    
-    if evs_bids is None:
-        print(f"Skipping {sub} | {exp} | {sess}: BIDS events file not found")
-        return {"skipped": True, "reason": "bids_events_not_found"}
-    
-    if exp == "ValueCourier":
-        evs_bids = fix_evs_bids(evs_bids)
-    
-    
-    # Check for required columns
-    required_cols = {'sample', 'onset', 'trial_type'}
-    missing_cols = required_cols - set(evs_bids.columns)
-    if missing_cols:
-        print(f"Skipping {sub} | {exp} | {sess}: BIDS events missing required columns: {missing_cols}")
-        print(f"Available columns: {list(evs_bids.columns)}")
-        return {"skipped": True, "reason": "missing_columns", "missing": list(missing_cols)}
-    
-    filtered_evs_bids = evs_bids[evs_bids["trial_type"].isin(evs_types_set)]
-    
-    if filtered_evs_bids.empty:
-        print(f"Skipping {sub} | {exp} | {sess}: No events match the requested types")
-        return {"skipped": True, "reason": "no_matching_events"}
-    print(filtered_evs_bids.columns)
-    # Compare behavioral data
+    base = BIDSPath(
+        subject=sub,
+        session=str(sess),
+        task=exp,
+        datatype="ieeg",
+        root=bids_root,
+        check=False,
+    )
+
+    results_all = {}
+    elec = None
+    elec_space = None
+
+    # ==================================================
+    # CONTACTS
+    # ==================================================
     try:
-        i = 0
-        results = compare_behavioral(
-            filtered_evs_cml, "CMLReader",
-            filtered_evs_bids, "OpenBIDS",
-            options=[
-                "compare_onset_as_diff",
-                "tolerant_numeric",
-                "return_col_summary",
-                "return_mismatches",
-            ],
-            drop_cols=[],
-        )
-        
-        os.makedirs(out_path, exist_ok=True)
-        results["df_behavior_summary"].to_csv(
-            os.path.join(out_path, f"df_behavior_summary_{sub}_{exp}_{sess}.csv"),
-            index=False,
-        )
-        
-        print(f"Successfully processed {sub} | {exp} | {sess}")
-        return results
-        
-    except Exception as e:
-        print(f"Failed to compare events for {sub} | {exp} | {sess}: {e}")
-        import traceback
-        traceback.print_exc()
-        return {"skipped": True, "reason": "comparison_failed", "error": str(e)}
-    
+        elec, elec_space = load_electrodes_any_space(base)
+        print(f"[INFO] Using electrodes space={elec_space}")
 
+        if contact_cml is None or contact_cml.empty:
+            print("[SKIP] No CML contacts")
+            results_all["contacts"] = {"skipped": True, "reason": "no_cml_contacts"}
+
+        else:
+            contact_bids = prep_bids_contacts_from_electrodes(
+                elec, elec_space=elec_space
+            )
+
+            res_contacts = compare_shared_columns(
+                contact_cml, "CML",
+                contact_bids, "BIDS",
+                options=["tolerant_numeric", "return_aligned", "print_col_summary"],
+                rtol=rtol_coords,
+                atol=atol_coords,
+                sort_keys=["label"],
+            )
+
+            res_contacts["df_summary"].to_csv(
+                os.path.join(out_path, f"df_contacts_summary_{sub}_{exp}_{sess}.csv"),
+                index=False,
+            )
+            res_contacts["df_column_summary"].to_csv(
+                os.path.join(out_path, f"df_contacts_column_summary_{sub}_{exp}_{sess}.csv"),
+                index=False,
+            )
+            res_contacts["df_mismatches"].to_csv(
+                os.path.join(out_path, f"df_contacts_mismatches_{sub}_{exp}_{sess}.csv"),
+                index=False,
+            )
+
+            results_all["contacts"] = res_contacts
+            print("[OK] Contacts comparison complete")
+
+    except FileNotFoundError:
+        print("[SKIP] No electrodes.tsv found")
+        results_all["contacts"] = {"skipped": True, "reason": "no_electrodes"}
+
+    except Exception as e:
+        print(f"[FAIL] Contacts comparison failed: {e}")
+        results_all["contacts"] = {"skipped": True, "reason": "error", "error": str(e)}
+
+    # ==================================================
+    # PAIRS
+    # ==================================================
+    try:
+        if elec is None:
+            elec, elec_space = load_electrodes_any_space(base)
+
+        # Load bipolar channels safely
+        ch_path = base.copy().update(
+            acquisition="bipolar",
+            suffix="channels",
+            extension=".tsv",
+        ).fpath
+
+        if ch_path is None or not os.path.exists(ch_path):
+            print("[SKIP] No bipolar channels.tsv")
+            results_all["pairs"] = {"skipped": True, "reason": "no_channels"}
+
+        else:
+            ch = pd.read_csv(ch_path, sep="\t")
+            ch_bip = ch[ch["name"].astype(str).str.contains("-")]
+
+            if ch_bip.empty:
+                print("[SKIP] No bipolar channels found")
+                results_all["pairs"] = {"skipped": True, "reason": "no_bipolar_channels"}
+
+            elif pairs_cml is None or pairs_cml.empty:
+                print("[SKIP] No CML pairs")
+                results_all["pairs"] = {"skipped": True, "reason": "no_cml_pairs"}
+
+            else:
+                pairs_bids = prep_bids_pairs_from_electrodes_and_bipolar_channels(
+                    elec=elec,
+                    ch_bip=ch_bip,
+                    elec_space=elec_space,
+                    label_col_channels="name",
+                    elec_name_col="name",
+                    region_col="ind.region",
+                )
+
+                res_pairs = compare_shared_columns(
+                    pairs_cml, "CML",
+                    pairs_bids, "BIDS",
+                    options=["tolerant_numeric", "return_aligned"],
+                    rtol=rtol_coords,
+                    atol=atol_coords,
+                    sort_keys=["label"],
+                )
+
+                res_pairs["df_summary"].to_csv(
+                    os.path.join(out_path, f"df_pairs_summary_{sub}_{exp}_{sess}.csv"),
+                    index=False,
+                )
+                res_pairs["df_column_summary"].to_csv(
+                    os.path.join(out_path, f"df_pairs_column_summary_{sub}_{exp}_{sess}.csv"),
+                    index=False,
+                )
+                res_pairs["df_mismatches"].to_csv(
+                    os.path.join(out_path, f"df_pairs_mismatches_{sub}_{exp}_{sess}.csv"),
+                    index=False,
+                )
+
+                results_all["pairs"] = res_pairs
+                print("[OK] Pairs comparison complete")
+
+    except FileNotFoundError:
+        print("[SKIP] No electrodes.tsv for pairs")
+        results_all["pairs"] = {"skipped": True, "reason": "no_electrodes"}
+
+    except Exception as e:
+        print(f"[FAIL] Pairs comparison failed: {e}")
+        results_all["pairs"] = {"skipped": True, "reason": "error", "error": str(e)}
+
+    # ==================================================
+    # Montage Summary
+    # ==================================================
+    pd.DataFrame([{
+        "subject": sub,
+        "experiment": exp,
+        "session": sess,
+        "electrodes_space_used": elec_space,
+        "contacts_skipped": results_all.get("contacts", {}).get("skipped", False),
+        "pairs_skipped": results_all.get("pairs", {}).get("skipped", False),
+    }]).to_csv(out_montage_summary, index=False)
+
+    return results_all
+
+
+# ------------------------------
+# IO
+# ------------------------------
 
 def load_and_concat(file_list, remove_duplicates=True):
     """
@@ -2002,7 +2965,10 @@ def delete_source_files(file_list, delete_files=False):
             except Exception as e:
                 print(f"Error deleting {f}: {e}")
     
-### PLOTTING
+# ------------------------------
+# Plotting
+# ------------------------------
+    
 def plot_comp_results(df_results, col_tgt, col_std=None, col_label=None):
     # plot mean and std difference
     comparisons = df_results['comparison'].unique()
