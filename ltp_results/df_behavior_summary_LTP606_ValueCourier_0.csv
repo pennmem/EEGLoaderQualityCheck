@@ -1,2 +1,0 @@
-subject,experiment,session,comparison,source_a,source_b,n_rows_compared,n_rows_a,n_rows_b,length_mismatch,n_columns_compared,n_differing_columns,differing_columns,n_only_in_a,n_only_in_b,only_in_a,only_in_b,any_mismatch,tolerant_numeric,numeric_rtol,numeric_atol,sort_keys_used,align_mode
-LTP606,ValueCourier,0,CMLReader vs OpenBIDS,CMLReader,OpenBIDS,242,242,242,False,35,1,['onset'],3,2,"['correctPointingDirection', 'finalrecalled', 'submittedPointingDirection']","['duration', 'stim_file']",True,True,1e-06,1e-08,"['sample', 'trial_type']",sorted
