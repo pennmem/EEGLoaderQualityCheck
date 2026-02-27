@@ -1258,7 +1258,7 @@ def process_raw_signals(sub, exp, sess, bids_root, out_path, localization=None, 
     reader = cml.CMLReader(subject=sub, experiment=exp, session=sess, localization=localization, montage=montage)
     if is_ieeg:
         contacts = reader.load("contacts")
-        contacts = reader.load("pairs")
+        pairs = reader.load("pairs")
         eeg_contacts_cml = reader.load_eeg(scheme=contacts).to_ptsa()
         eeg_pairs_cml = reader.load_eeg(scheme=pairs).to_ptsa()
     else:
@@ -1285,10 +1285,21 @@ def process_raw_signals(sub, exp, sess, bids_root, out_path, localization=None, 
             ).fpath,
             sep="\t"
         )
+        
+        mono_signal = BIDSPath(
+            subject=sub,
+            session=str(sess),
+            task=exp,
+            root=bids_root,
+            datatype="ieeg",
+            acquisition="monopolar",
+            extension=".edf",
+            check=False
+        )
 
 
         raw_mono = read_raw_bids(
-            ch_mono,
+            mono_signal,
             verbose=True,
         )
 
@@ -1326,9 +1337,19 @@ def process_raw_signals(sub, exp, sess, bids_root, out_path, localization=None, 
             sep="\t"
         )
 
+        bi_signal = BIDSPath(
+            subject=sub,
+            session=str(sess),
+            task=exp,
+            root=bids_root,
+            datatype="ieeg",
+            acquisition="bipolar",
+            extension=".edf",
+            check=False
+        )
 
         raw_bi = read_raw_bids(
-            ch_bi,
+            bi_signal,
             verbose=True,
         )
 
@@ -1535,6 +1556,9 @@ def process_epoched_signals(
     # iEEG: load CML schemes once (contacts + pairs) if requested
     # --------------------------
     cml_scheme_by_acq = {}
+    contacts = None
+    pairs = None
+    print(is_ieeg)
     if is_ieeg:
         contacts = cmlreader.load("contacts")
         pairs = cmlreader.load("pairs")
