@@ -40,12 +40,15 @@ def get_reader(
     bids_root: str,
 ) -> BIDSReader:
     """Create a BIDSReader for the given session."""
-    return BIDSReader(
+    reader = BIDSReader(
         subject=subject,
         session=session,
         task=experiment,
         root=bids_root,
     )
+    if not reader.is_intracranial():
+        reader.set_fields(task=experiment.lower())
+    return reader
 
 
 # ======================================================================

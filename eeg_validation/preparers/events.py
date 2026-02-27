@@ -63,14 +63,15 @@ def prep_events(
     cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
 
     # Ensure comparable types
-    cml2["sample"] = pd.to_numeric(cml2["sample"], errors="raise")
-    bids2["sample"] = pd.to_numeric(bids2["sample"], errors="raise")
+    cml2["sample"] = pd.to_numeric(cml2["sample"], errors="coerce")
+    print(cml2["sample"])
+    bids2["sample"] = pd.to_numeric(bids2["sample"], errors="coerce")
     cml2["trial_type"] = cml2["trial_type"].astype(str)
     bids2["trial_type"] = bids2["trial_type"].astype(str)
 
     # Onset conversion
-    cml_onset_s = pd.to_numeric(cml_f["mstime"], errors="raise") / 1000.0
-    bids_onset_s = pd.to_numeric(bids2["onset"], errors="raise")
+    cml_onset_s = pd.to_numeric(cml_f["mstime"], errors="coerce") / 1000.0
+    bids_onset_s = pd.to_numeric(bids2["onset"], errors="coerce")
 
     if onset_as_diff:
         cml2["onset"] = cml_onset_s.diff()

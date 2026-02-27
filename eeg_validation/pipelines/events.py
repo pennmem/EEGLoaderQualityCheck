@@ -36,10 +36,11 @@ class EventsPipeline(BasePipeline):
 
         # Load BIDS events via BIDSReader
         try:
-            evs_bids = load_bids_events(self.reader)
+            evs_bids = load_bids_events(reader=self.reader, event_type=self.reader.eeg_type)
         except Exception as e:
             return {"skipped": True, "reason": "bids_events_not_found", "error": str(e)}
 
+        
         # Experiment-specific fixes
         evs_cml, evs_bids = apply_fixes(self.experiment, evs_cml, evs_bids)
 
