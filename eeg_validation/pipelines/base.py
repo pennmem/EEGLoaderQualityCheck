@@ -31,6 +31,7 @@ class BasePipeline(ABC):
         # CML-only (iEEG)
         localization: Optional[int] = None,
         montage: Optional[int] = None,
+        verbose: bool = False
     ):
         self.subject = subject
         self.experiment = experiment
@@ -40,6 +41,7 @@ class BasePipeline(ABC):
         self.skip_if_exists = skip_if_exists
         self.localization = localization
         self.montage = montage
+        self.verbose = verbose
 
         # Single BIDSReader for the whole pipeline
         self.reader = get_reader(subject, experiment, session, bids_root)
