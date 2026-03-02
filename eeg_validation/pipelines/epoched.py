@@ -131,7 +131,19 @@ class EpochedPipeline(BasePipeline):
             )
 
             # ==============================================================
+            # Build sample → types lookup (for slicing after bulk load)
+            # ==============================================================
+            cml_offsets_by_type = {}
+            for etype, evs in cml_events_by_type.items():
+                cml_offsets_by_type[etype] = set(evs["eegoffset"].values)
+
+            bids_samples_by_type = {}
+            for etype, evs in bids_events_by_type.items():
+                bids_samples_by_type[etype] = set(evs["sample"].values)
+
+            # ==============================================================
             # Bulk-load CML epochs (one read of the raw file)
+            # Globally dedupe by eegoffset so MNE sees unique samples.
             # ==============================================================
             eeg_cml_all = None
             evs_cml_combined = pd.DataFrame()
@@ -140,8 +152,10 @@ class EpochedPipeline(BasePipeline):
                 evs_cml_combined = pd.concat(
                     [cml_events_by_type[t] for t in types_to_run if t in cml_events_by_type],
                     ignore_index=True,
-                )
-                self._vprint(f"  Loading ALL CML epochs ({len(evs_cml_combined)} events)...")
+                ).drop_duplicates(subset=["eegoffset"], keep="first") \
+                 .sort_values("eegoffset").reset_index(drop=True)
+
+                self._vprint(f"  Loading ALL CML epochs ({len(evs_cml_combined)} unique samples)...")
                 eeg_cml_all = load_cml_eeg_epoched(
                     self.subject, self.experiment, self.session,
                     evs_cml_combined, self.tmin, self.tmax,
@@ -152,6 +166,7 @@ class EpochedPipeline(BasePipeline):
 
             # ==============================================================
             # Bulk-load BIDS epochs (one read of the raw file)
+            # Globally dedupe by sample so MNE sees unique samples.
             # ==============================================================
             eeg_bids_all = None
             evs_bids_combined = pd.DataFrame()
@@ -160,9 +175,10 @@ class EpochedPipeline(BasePipeline):
                 evs_bids_combined = pd.concat(
                     [bids_events_by_type[t] for t in types_to_run if t in bids_events_by_type],
                     ignore_index=True,
-                ).sort_values("sample").reset_index(drop=True)
+                ).drop_duplicates(subset=["sample"], keep="first") \
+                 .sort_values("sample").reset_index(drop=True)
 
-                self._vprint(f"  Loading ALL BIDS epochs ({len(evs_bids_combined)} events)...")
+                self._vprint(f"  Loading ALL BIDS epochs ({len(evs_bids_combined)} unique samples)...")
                 epochs_bids_all = self.reader.load_epochs(
                     tmin=self.tmin / 1000.0,
                     tmax=self.tmax / 1000.0,
@@ -192,7 +208,7 @@ class EpochedPipeline(BasePipeline):
                 del epochs_bids_all
 
             # ==============================================================
-            # Per event type: slice and compare
+            # Per event type: slice by sample lookup and compare
             # ==============================================================
             all_raw, all_summary, all_time, status = [], [], [], []
 
@@ -209,14 +225,14 @@ class EpochedPipeline(BasePipeline):
                         status.append((acq_tag, etype, "skip", "no_bids_events"))
                         continue
 
-                    # CML slice
-                    cml_mask = evs_cml_combined["type"].values == etype
-                    eeg_cml_t = eeg_cml_all.isel(event=np.where(cml_mask)[0])
+                    # CML slice: find deduped rows whose eegoffset belongs to this type
+                    cml_mask = evs_cml_combined["eegoffset"].isin(cml_offsets_by_type[etype])
+                    eeg_cml_t = eeg_cml_all.isel(event=np.where(cml_mask.values)[0])
                     self._vprint(f"      CML slice: {eeg_cml_t.shape}")
 
-                    # BIDS slice
-                    bids_mask = evs_bids_combined["trial_type"].values == etype
-                    eeg_bids_t = eeg_bids_all.isel(event=np.where(bids_mask)[0])
+                    # BIDS slice: find deduped rows whose sample belongs to this type
+                    bids_mask = evs_bids_combined["sample"].isin(bids_samples_by_type[etype])
+                    eeg_bids_t = eeg_bids_all.isel(event=np.where(bids_mask.values)[0])
                     self._vprint(f"      BIDS slice: {eeg_bids_t.shape}")
 
                     # Compare
