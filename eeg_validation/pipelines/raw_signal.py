@@ -68,7 +68,7 @@ class RawSignalPipeline(BasePipeline):
                     subject=self.subject, experiment=self.experiment,
                     session=self.session,
                 )
-                self._vprint(f"  Comparison complete (match={result.match})")
+                self._vprint(f"  Comparison complete (match={result.ok})")
 
                 self._save_df(result.extras["df_raw"], f"df_raw_{self.session_tag}_{acq_tag}.csv")
                 self._save_df(result.extras["df_raw_summary"], f"df_raw_summary_{self.session_tag}_{acq_tag}.csv")
@@ -97,7 +97,7 @@ class RawSignalPipeline(BasePipeline):
                 subject=self.subject, experiment=self.experiment,
                 session=self.session,
             )
-            self._vprint(f"  Comparison complete (match={result.match})")
+            self._vprint(f"  Comparison complete (match={result.ok})")
 
             self._save_df(result.extras["df_raw"], f"df_raw_{self.session_tag}.csv")
             self._save_df(result.extras["df_raw_summary"], f"df_raw_summary_{self.session_tag}.csv")

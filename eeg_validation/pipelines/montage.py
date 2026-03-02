@@ -65,7 +65,7 @@ class MontagePipeline(BasePipeline):
                 subject=self.subject, experiment=self.experiment,
                 session=self.session, return_aligned=True,
             )
-            self._vprint(f"  Contacts comparison complete (match={res.match})")
+            self._vprint(f"  Contacts comparison complete (match={res.ok})")
 
             tag = self.session_tag
             self._save_df(res.df_summary, f"df_contacts_summary_{tag}.csv")
@@ -110,7 +110,7 @@ class MontagePipeline(BasePipeline):
                     subject=self.subject, experiment=self.experiment,
                     session=self.session, return_aligned=True,
                 )
-                self._vprint(f"  Pairs comparison complete (match={res.match})")
+                self._vprint(f"  Pairs comparison complete (match={res.ok})")
 
                 tag = self.session_tag
                 self._save_df(res.df_summary, f"df_pairs_summary_{tag}.csv")

@@ -180,7 +180,7 @@ class EpochedPipeline(BasePipeline):
                         subject=self.subject, experiment=self.experiment,
                         session=self.session,
                     )
-                    self._vprint(f"      Comparison complete (match={result.match})")
+                    self._vprint(f"      Comparison complete (match={result.ok})")
 
                     for key, container in [
                         ("df_raw", all_raw),

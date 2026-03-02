@@ -82,7 +82,7 @@ class EventsPipeline(BasePipeline):
             session=self.session,
             return_aligned=True,
         )
-        self._vprint(f"  Comparison complete (match={result.match})")
+        self._vprint(f"  Comparison complete (match={result.ok})")
 
         # Save
         self._save_df(result.df_summary, f"df_behavior_summary_{self.session_tag}.csv")
