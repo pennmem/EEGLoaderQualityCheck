@@ -191,7 +191,7 @@ class EpochedPipeline(BasePipeline):
 
                 # Pick only EEG/iEEG channels (once)
                 if self.is_intracranial:
-                    picks = mne.pick_types(epochs_bids_all.info, ieeg=True, eeg=False, eog=False, misc=False)
+                    picks = mne.pick_types(epochs_bids_all.info, seeg=True, ecog=True, eeg=False, eog=False, misc=False)
                 else:
                     picks = mne.pick_types(epochs_bids_all.info, eeg=True, eog=False, misc=False)
                 if len(picks) == 0:
