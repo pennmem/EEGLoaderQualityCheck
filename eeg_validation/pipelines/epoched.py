@@ -69,10 +69,10 @@ class EpochedPipeline(BasePipeline):
         )
         self._vprint(f"  CML events loaded: {len(evs_cml)} rows")
 
-        # Load BIDS events once (behavioral events with sample/trial_type columns)
-        self._vprint(f"  Loading BIDS events...")
-        evs_bids = load_bids_events(self.reader)
-        self._vprint(f"  BIDS events loaded: {len(evs_bids)} rows")
+        # Load BIDS events once (EEG-aligned events with sample/trial_type columns)
+        self._vprint(f"  Loading BIDS events (event_type={self.reader.eeg_type})...")
+        evs_bids = load_bids_events(self.reader, event_type=self.reader.eeg_type)
+        self._vprint(f"  BIDS events loaded: {len(evs_bids)} rows, columns={list(evs_bids.columns)}")
 
         types_to_run = (
             sorted(set(self.evs_types))
