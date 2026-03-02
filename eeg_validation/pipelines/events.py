@@ -29,22 +29,29 @@ class EventsPipeline(BasePipeline):
 
     def _run(self) -> Dict[str, Any]:
         # Load CML events
+        self._vprint(f"  Loading CML events...")
         evs_cml = load_cml_events(
             self.subject, self.experiment, self.session,
             localization=self.localization, montage=self.montage,
         )
+        self._vprint(f"  CML events loaded: {len(evs_cml)} rows, types={sorted(evs_cml['type'].dropna().unique())}")
 
         # Load BIDS events via BIDSReader
+        self._vprint(f"  Loading BIDS events...")
         try:
             evs_bids = load_bids_events(reader=self.reader, event_type=self.reader.eeg_type)
         except Exception as e:
+            self._vprint(f"  BIDS events not found: {e}")
             return {"skipped": True, "reason": "bids_events_not_found", "error": str(e)}
+        self._vprint(f"  BIDS events loaded: {len(evs_bids)} rows")
 
-        
         # Experiment-specific fixes
+        self._vprint(f"  Applying experiment-specific fixes for '{self.experiment}'...")
         evs_cml, evs_bids = apply_fixes(self.experiment, evs_cml, evs_bids)
+        self._vprint(f"  After fixes: CML={len(evs_cml)} rows, BIDS={len(evs_bids)} rows")
 
         # Prep
+        self._vprint(f"  Preparing events (evs_types={self.evs_types})...")
         prep = prep_events(
             evs_cml, evs_bids,
             evs_types=self.evs_types,
@@ -53,11 +60,14 @@ class EventsPipeline(BasePipeline):
             experiment=self.experiment,
             session=self.session,
         )
+        self._vprint(f"  Prepped: CML={len(prep['evs_cml_prepped'])} rows, BIDS={len(prep['evs_bids_prepped'])} rows")
 
         if len(prep["evs_cml_prepped"]) == 0 or len(prep["evs_bids_prepped"]) == 0:
+            self._vprint(f"  Skipped: no matching events after prep")
             return {"skipped": True, "reason": "no_matching_events"}
 
         # Compare
+        self._vprint(f"  Comparing CMLReader vs OpenBIDS events...")
         comparator = DataFrameComparator(
             tolerant_numeric=True,
             sort_keys=["sample", "trial_type"],
@@ -72,6 +82,7 @@ class EventsPipeline(BasePipeline):
             session=self.session,
             return_aligned=True,
         )
+        self._vprint(f"  Comparison complete (match={result.match})")
 
         # Save
         self._save_df(result.df_summary, f"df_behavior_summary_{self.session_tag}.csv")

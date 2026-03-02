@@ -62,36 +62,46 @@ class EpochedPipeline(BasePipeline):
 
     def _run(self) -> Dict[str, Any]:
         # Load CML events once
+        self._vprint(f"  Loading CML events...")
         evs_cml = load_cml_events(
             self.subject, self.experiment, self.session,
             localization=self.localization, montage=self.montage,
         )
+        self._vprint(f"  CML events loaded: {len(evs_cml)} rows")
 
         # Load BIDS events once (behavioral events with sample/trial_type columns)
+        self._vprint(f"  Loading BIDS events...")
         evs_bids = load_bids_events(self.reader)
+        self._vprint(f"  BIDS events loaded: {len(evs_bids)} rows")
 
         types_to_run = (
             sorted(set(self.evs_types))
             if self.evs_types
             else sorted(evs_cml["type"].dropna().unique())
         )
+        self._vprint(f"  Event types to process: {types_to_run}")
+        self._vprint(f"  Epoch window: tmin={self.tmin}, tmax={self.tmax}")
 
         # CML schemes for iEEG
         cml_schemes = {}
         if self.is_intracranial:
+            self._vprint(f"  Loading CML contacts and pairs (intracranial)...")
             contacts, pairs = load_cml_contacts_and_pairs(
                 self.subject, self.experiment, self.session,
                 self.localization, self.montage,
             )
             cml_schemes = {"monopolar": contacts, "bipolar": pairs}
+            self._vprint(f"  Contacts: {len(contacts)}, Pairs: {len(pairs)}")
 
         # Determine acquisition streams
         acq_tags = ["monopolar", "bipolar"] if self.is_intracranial else ["eeg"]
+        self._vprint(f"  Acquisition streams: {acq_tags}")
 
         comparator = SignalComparator()
         results_all = {}
 
         for acq_tag in acq_tags:
+            self._vprint(f"\n  --- Acquisition: {acq_tag} ---")
             # For BIDS: determine acquisition param for BIDSReader
             bids_acq = acq_tag if self.is_intracranial else None
 
@@ -99,24 +109,31 @@ class EpochedPipeline(BasePipeline):
 
             for etype in types_to_run:
                 try:
+                    self._vprint(f"    Processing event type: {etype}")
+
                     # ---- CML: filter + dedupe + epoch ----
                     evs_cml_t = evs_cml[evs_cml["type"] == etype].copy()
                     if evs_cml_t.empty:
+                        self._vprint(f"      Skipped: no CML events for type '{etype}'")
                         status.append((acq_tag, etype, "skip", "no_cml_events"))
                         continue
 
                     evs_cml_t = dedupe_events_by_sample(evs_cml_t, "eegoffset")
+                    self._vprint(f"      CML events after dedupe: {len(evs_cml_t)}")
                     scheme = cml_schemes.get(acq_tag)
+                    self._vprint(f"      Loading CML epoched EEG...")
                     eeg_cml = load_cml_eeg_epoched(
                         self.subject, self.experiment, self.session,
                         evs_cml_t, self.tmin, self.tmax,
                         localization=self.localization, montage=self.montage,
                         scheme=scheme,
                     )
+                    self._vprint(f"      CML EEG shape: {eeg_cml.shape}")
 
                     # ---- BIDS: filter events DF → load_epochs(events=) ----
                     evs_bids_t, _ = filter_events_df(evs_bids, etype)
                     if evs_bids_t.empty:
+                        self._vprint(f"      Skipped: no BIDS events for type '{etype}'")
                         status.append((acq_tag, etype, "skip", "no_bids_events"))
                         del eeg_cml
                         gc.collect()
@@ -124,9 +141,11 @@ class EpochedPipeline(BasePipeline):
 
                     # Dedupe by sample for BIDS too
                     evs_bids_t = evs_bids_t.drop_duplicates(subset=["sample"], keep="first")
+                    self._vprint(f"      BIDS events after dedupe: {len(evs_bids_t)}")
 
                     # BIDSReader.load_epochs accepts an events DataFrame
                     # with 'sample' and 'trial_type' columns
+                    self._vprint(f"      Loading BIDS epochs...")
                     epochs_bids = self.reader.load_epochs(
                         tmin=self.tmin / 1000.0,
                         tmax=self.tmax / 1000.0,
@@ -135,6 +154,7 @@ class EpochedPipeline(BasePipeline):
                         baseline=None,
                         preload=True,
                     )
+                    self._vprint(f"      BIDS epochs: {len(epochs_bids)} epochs, {len(epochs_bids.ch_names)} channels")
 
                     # Pick only EEG/iEEG channels
                     if self.is_intracranial:
@@ -144,19 +164,23 @@ class EpochedPipeline(BasePipeline):
                     if len(picks) == 0:
                         picks = np.arange(len(epochs_bids.ch_names))
                     epochs_bids = epochs_bids.pick(picks)
+                    self._vprint(f"      After channel pick: {len(epochs_bids.ch_names)} channels")
 
                     # Convert to PTSA TimeSeries via BIDSReader static method
                     eeg_bids = epochs_to_ptsa(epochs_bids, evs_bids_t)
                     eeg_bids = eeg_bids.assign_coords(time=eeg_bids["time"] * 1000.0)
                     eeg_bids["time"].attrs["units"] = "ms"
+                    self._vprint(f"      BIDS EEG shape: {eeg_bids.shape}")
 
                     # ---- Compare ----
+                    self._vprint(f"      Comparing BIDS vs CML...")
                     result = comparator.compare(
                         eeg_bids, eeg_cml,
                         label_a="BIDS", label_b="CMLReader",
                         subject=self.subject, experiment=self.experiment,
                         session=self.session,
                     )
+                    self._vprint(f"      Comparison complete (match={result.match})")
 
                     for key, container in [
                         ("df_raw", all_raw),
@@ -173,11 +197,13 @@ class EpochedPipeline(BasePipeline):
                     status.append((acq_tag, etype, "ok", ""))
 
                 except Exception as e:
+                    self._vprint(f"      FAILED: {repr(e)}")
                     status.append((acq_tag, etype, "fail", repr(e)))
                 finally:
                     gc.collect()
 
             # Save per acquisition
+            self._vprint(f"\n  Saving results for {acq_tag}...")
             tag = self.session_tag
             df_raw = pd.concat(all_raw, ignore_index=True) if all_raw else pd.DataFrame()
             df_summary = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()

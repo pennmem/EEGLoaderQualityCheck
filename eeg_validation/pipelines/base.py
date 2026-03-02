@@ -58,13 +58,21 @@ class BasePipeline(ABC):
     # Template method
     # ------------------------------------------------------------------
     def run(self) -> Dict[str, Any]:
+        self._vprint(f"\n{'='*60}")
+        self._vprint(f"[{self.__class__.__name__}] Starting pipeline for {self.session_tag}")
+        self._vprint(f"{'='*60}")
+
         os.makedirs(self.out_path, exist_ok=True)
 
         paths = self._output_paths()
         if self.skip_if_exists and all(os.path.exists(p) for p in paths):
+            self._vprint(f"  Skipping: all {len(paths)} output files already exist")
             return {"skipped": True, "reason": "outputs_exist", "paths": paths}
 
-        return self._run()
+        self._vprint(f"  Output directory: {self.out_path}")
+        result = self._run()
+        self._vprint(f"[{self.__class__.__name__}] Pipeline complete for {self.session_tag}\n")
+        return result
 
     # ------------------------------------------------------------------
     # Subclass hooks
@@ -82,9 +90,15 @@ class BasePipeline(ABC):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _vprint(self, *args, **kwargs):
+        """Print only when verbose mode is enabled."""
+        if self.verbose:
+            print(*args, **kwargs)
+
     def _save_df(self, df: pd.DataFrame, filename: str) -> str:
         path = os.path.join(self.out_path, filename)
         df.to_csv(path, index=False)
+        self._vprint(f"  Saved {filename} ({len(df)} rows)")
         return path
 
     def _make_path(self, prefix: str, suffix: str = ".csv") -> str:
