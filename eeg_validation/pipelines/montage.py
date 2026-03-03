@@ -1,4 +1,4 @@
-"""Montage (contacts + pairs) comparison pipeline.
+"""Montage (contacts or pairs) comparison pipeline.
 
 Uses BIDSReader.load_electrodes() and BIDSReader.load_channels() instead
 of manually constructing BIDSPaths.
@@ -18,7 +18,11 @@ from ..comparators.dataframe import DataFrameComparator
 
 
 class MontagePipeline(BasePipeline):
-    """Compare CML vs BIDS contacts and pairs for one iEEG session."""
+    """Compare CML vs BIDS contacts or pairs for one iEEG session.
+
+    Set ``acquisition="contacts"`` to compare contacts (monopolar),
+    or ``acquisition="pairs"`` to compare pairs (bipolar).
+    """
 
     def __init__(self, *args, atol_coords: float = 1e-3, rtol_coords: float = 0.0, **kwargs):
         super().__init__(*args, **kwargs)
@@ -26,7 +30,9 @@ class MontagePipeline(BasePipeline):
         self.rtol_coords = rtol_coords
 
     def _output_paths(self) -> List[str]:
-        return [self._make_path("df_montage_summary")]
+        tag = self.session_tag
+        acq = self.acq_label
+        return [self._make_path(f"df_montage_summary_{acq}")]
 
     def _run(self) -> Dict[str, Any]:
         self._vprint(f"  Loading CML contacts and pairs...")
@@ -43,18 +49,19 @@ class MontagePipeline(BasePipeline):
             sort_keys=["label"],
         )
 
-        results = {}
-        elec = None
-        elec_space = None
+        tag = self.session_tag
+        acq = self.acq_label
 
-        # --- Contacts ---
-        self._vprint(f"\n  --- Contacts comparison ---")
-        try:
-            self._vprint(f"  Loading BIDS electrodes...")
-            elec = load_bids_electrodes(self.reader)
-            elec_space = self.reader.space or "unknown"
-            self._vprint(f"  BIDS electrodes loaded: {len(elec)} contacts, space='{elec_space}'")
+        # Load electrodes (needed for both contacts and pairs)
+        self._vprint(f"  Loading BIDS electrodes...")
+        elec = load_bids_electrodes(self.reader)
+        elec_space = self.reader.space or "unknown"
+        self._vprint(f"  BIDS electrodes loaded: {len(elec)} contacts, space='{elec_space}'")
 
+        result = {}
+
+        if self.acquisition == "contacts":
+            self._vprint(f"\n  --- Contacts comparison ---")
             contact_bids = prep_contacts(elec, elec_space=elec_space)
             self._vprint(f"  Prepped BIDS contacts: {len(contact_bids)} rows")
 
@@ -65,40 +72,26 @@ class MontagePipeline(BasePipeline):
                 subject=self.subject, experiment=self.experiment,
                 session=self.session, return_aligned=True,
             )
-            self._vprint(f"  Contacts comparison complete (match={res.ok})")
+            self._vprint(f"  Contacts comparison complete (ok={res.ok})")
 
-            tag = self.session_tag
             self._save_df(res.df_summary, f"df_contacts_summary_{tag}.csv")
             self._save_df(res.df_detail, f"df_contacts_column_summary_{tag}.csv")
             self._save_df(res.df_mismatches, f"df_contacts_mismatches_{tag}.csv")
-            results["contacts"] = res
+            result = res
 
-        except FileNotFoundError:
-            self._vprint(f"  Skipped contacts: no electrodes file found")
-            results["contacts"] = {"skipped": True, "reason": "no_electrodes"}
-        except Exception as e:
-            self._vprint(f"  Contacts comparison failed: {e}")
-            results["contacts"] = {"skipped": True, "reason": "error", "error": str(e)}
-
-        # --- Pairs ---
-        self._vprint(f"\n  --- Pairs comparison ---")
-        try:
-            if elec is None:
-                self._vprint(f"  Loading BIDS electrodes (not loaded yet)...")
-                elec = load_bids_electrodes(self.reader)
-                elec_space = self.reader.space or "unknown"
-
+        elif self.acquisition == "pairs":
+            self._vprint(f"\n  --- Pairs comparison ---")
             self._vprint(f"  Loading BIDS bipolar channels...")
             ch_bip = load_bids_channels(self.reader, acquisition="bipolar")
             ch_bip = ch_bip[ch_bip["name"].astype(str).str.contains("-")]
             self._vprint(f"  Bipolar channels found: {len(ch_bip)}")
 
             if ch_bip.empty:
-                self._vprint(f"  Skipped pairs: no bipolar channels")
-                results["pairs"] = {"skipped": True, "reason": "no_bipolar_channels"}
+                self._vprint(f"  Skipped: no bipolar channels")
+                result = {"skipped": True, "reason": "no_bipolar_channels"}
             elif pairs_cml is None or pairs_cml.empty:
-                self._vprint(f"  Skipped pairs: no CML pairs data")
-                results["pairs"] = {"skipped": True, "reason": "no_cml_pairs"}
+                self._vprint(f"  Skipped: no CML pairs data")
+                result = {"skipped": True, "reason": "no_cml_pairs"}
             else:
                 pairs_bids = prep_pairs(elec, ch_bip, elec_space=elec_space)
                 self._vprint(f"  Prepped BIDS pairs: {len(pairs_bids)} rows")
@@ -110,29 +103,22 @@ class MontagePipeline(BasePipeline):
                     subject=self.subject, experiment=self.experiment,
                     session=self.session, return_aligned=True,
                 )
-                self._vprint(f"  Pairs comparison complete (match={res.ok})")
+                self._vprint(f"  Pairs comparison complete (ok={res.ok})")
 
-                tag = self.session_tag
                 self._save_df(res.df_summary, f"df_pairs_summary_{tag}.csv")
                 self._save_df(res.df_detail, f"df_pairs_column_summary_{tag}.csv")
                 self._save_df(res.df_mismatches, f"df_pairs_mismatches_{tag}.csv")
-                results["pairs"] = res
+                result = res
 
-        except FileNotFoundError:
-            self._vprint(f"  Skipped pairs: no electrodes file found")
-            results["pairs"] = {"skipped": True, "reason": "no_electrodes"}
-        except Exception as e:
-            self._vprint(f"  Pairs comparison failed: {e}")
-            results["pairs"] = {"skipped": True, "reason": "error", "error": str(e)}
-
-        # --- Summary marker ---
+        # Summary marker
+        skipped = isinstance(result, dict) and result.get("skipped", False)
         pd.DataFrame([{
             "subject": self.subject,
             "experiment": self.experiment,
             "session": self.session,
+            "acquisition": acq,
             "electrodes_space_used": elec_space,
-            "contacts_skipped": isinstance(results.get("contacts"), dict) and results["contacts"].get("skipped", False),
-            "pairs_skipped": isinstance(results.get("pairs"), dict) and results["pairs"].get("skipped", False),
-        }]).to_csv(self._make_path("df_montage_summary"), index=False)
+            "skipped": skipped,
+        }]).to_csv(self._make_path(f"df_montage_summary_{acq}"), index=False)
 
-        return results
+        return result

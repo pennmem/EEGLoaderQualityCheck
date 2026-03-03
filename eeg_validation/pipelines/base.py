@@ -19,6 +19,12 @@ class BasePipeline(ABC):
     declare :meth:`_output_paths`.
     """
 
+    # Maps user-facing acquisition names to CML / BIDS conventions
+    _ACQ_MAP = {
+        "contacts": {"bids": "monopolar", "cml_key": "contacts"},
+        "pairs":    {"bids": "bipolar",   "cml_key": "pairs"},
+    }
+
     def __init__(
         self,
         subject: str,
@@ -31,6 +37,7 @@ class BasePipeline(ABC):
         # CML-only (iEEG)
         localization: Optional[int] = None,
         montage: Optional[int] = None,
+        acquisition: Optional[str] = None,
         verbose: bool = False
     ):
         self.subject = subject
@@ -41,6 +48,7 @@ class BasePipeline(ABC):
         self.skip_if_exists = skip_if_exists
         self.localization = localization
         self.montage = montage
+        self.acquisition = acquisition
         self.verbose = verbose
 
         # Single BIDSReader for the whole pipeline
@@ -53,6 +61,18 @@ class BasePipeline(ABC):
     @property
     def session_tag(self) -> str:
         return f"{self.subject}_{self.experiment}_{self.session}"
+
+    @property
+    def bids_acquisition(self) -> Optional[str]:
+        """BIDS acquisition string ('monopolar'/'bipolar') or None for scalp."""
+        if self.acquisition is None:
+            return None
+        return self._ACQ_MAP[self.acquisition]["bids"]
+
+    @property
+    def acq_label(self) -> str:
+        """Short label for file naming — 'contacts', 'pairs', or 'eeg'."""
+        return self.acquisition or "eeg"
 
     # ------------------------------------------------------------------
     # Template method
