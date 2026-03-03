@@ -1,0 +1,22 @@
+subject,experiment,session,comparison,time_len_a,time_len_b,time_compared_samples,n_events,n_close_diff_events,close_diff_event_indices,n_exact_time_diff,n_close_time_diff,mean_abs_time_diff,max_abs_time_diff,mean_signed_time_diff,std_time_diff,mse_time,event_type,acquisition
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,FINAL_COMPENSATION,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,13,0,[],0,0,0.0,0.0,0.0,0.0,0.0,POINTER_ON,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,2,0,[],0,0,0.0,0.0,0.0,0.0,0.0,PRACTICE_DELIVERY_END,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,2,0,[],0,0,0.0,0.0,0.0,0.0,0.0,PRACTICE_DELIVERY_START,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,2,0,[],0,0,0.0,0.0,0.0,0.0,0.0,PRACTICE_VALUE_RECALL,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,30,0,[],0,0,0.0,0.0,0.0,0.0,0.0,PRACTICE_WORD,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,7,0,[],0,0,0.0,0.0,0.0,0.0,0.0,REC_START,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,7,0,[],0,0,0.0,0.0,0.0,0.0,0.0,REC_STOP,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,29,0,[],0,0,0.0,0.0,0.0,0.0,0.0,REC_WORD,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,3,0,[],0,0,0.0,0.0,0.0,0.0,0.0,REC_WORD_VV,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,SESS_END,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,50,0,[],0,0,0.0,0.0,0.0,0.0,0.0,SESS_START,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,TL_END,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,TL_START,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,5,0,[],0,0,0.0,0.0,0.0,0.0,0.0,TRIAL_END,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,5,0,[],0,0,0.0,0.0,0.0,0.0,0.0,TRIAL_START,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,5,0,[],0,0,0.0,0.0,0.0,0.0,0.0,VALUE_RECALL,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,VIDEO_START,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,VIDEO_STOP,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,75,0,[],0,0,0.0,0.0,0.0,0.0,0.0,WORD,eeg
+LTP606,ValueCourier,0,BIDS vs CMLReader,6145,6145,6145,1,0,[],0,0,0.0,0.0,0.0,0.0,0.0,store mappings,eeg

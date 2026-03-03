@@ -8,3 +8,5 @@ ltp_results
 ltp_final
 ram_final
 ram_results
+ram_*
+ltp_*
