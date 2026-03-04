@@ -179,9 +179,11 @@ class EpochedPipeline(BasePipeline):
                 if len(picks) == 0:
                     picks = np.arange(len(epochs_all.ch_names))
                 epochs_all = epochs_all.pick(picks)
-
+                epochs_all = convert_unit(epochs_all, "uV", copy=False)
+                epochs_all._data = np.round(epochs_all._data)
+                # epochs_all._data = np.round(epochs_all._data)
                 eeg_all = epochs_to_ptsa(epochs_all, evs_combined)
-                eeg_all = convert_unit(eeg_all, "uV", copy=False)
+                
                 eeg_all = eeg_all.assign_coords(time=eeg_all["time"] * 1000.0)
                 eeg_all["time"].attrs["units"] = "ms"
                 self._vprint(f"  BIDS bulk EEG shape: {eeg_all.shape}")

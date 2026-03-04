@@ -7,8 +7,9 @@ from typing import Any, Dict, List, Optional
 
 from .base import BasePipeline
 from ..loaders.cml import load_cml_eeg_raw, load_cml_contacts_and_pairs
-from ..loaders.bids import load_bids_raw, raw_to_xarray
+from ..loaders.bids import load_bids_raw, raw_to_xarray, convert_unit
 from ..comparators.signal import SignalComparator
+import numpy as np
 
 
 class RawSignalPipeline(BasePipeline):
@@ -52,7 +53,11 @@ class RawSignalPipeline(BasePipeline):
         # BIDS raw
         self._vprint(f"  Loading BIDS raw EEG (acquisition={self.bids_acquisition})...")
         raw_bids = load_bids_raw(self.reader, acquisition=self.bids_acquisition)
-        eeg_bids = raw_to_xarray(raw_bids, time_unit_ms=True)
+        raw_bids.load_data()
+        raw_bids._data *= 1e6
+        raw_bids._data = np.round(raw_bids._data)
+        self._vprint(f"After rounds")
+        eeg_bids = raw_to_xarray(raw_bids, convert_ms=True)
         self._vprint(f"  BIDS raw EEG shape: {eeg_bids.shape}")
 
         # Compare

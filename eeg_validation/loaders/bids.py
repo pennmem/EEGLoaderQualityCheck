@@ -23,6 +23,7 @@ import mne
 import numpy as np
 import pandas as pd
 import xarray as xr
+from ptsa.data.timeseries import TimeSeries
 
 import sys
 sys.path.append("/home1/zrentala/bidsreader")
@@ -89,10 +90,10 @@ def load_bids_raw(
 def raw_to_xarray(
     raw: mne.io.BaseRaw,
     *,
-    time_unit_ms: bool = True,
+    convert_ms: bool = True,
 ) -> xr.DataArray:
     """Convert an MNE Raw to a 3-D xarray (event=1, channel, time)."""
-    scale = 1000.0 if time_unit_ms else 1.0
+    scale = 1000.0 if convert_ms else 1.0
     return xr.DataArray(
         raw.get_data()[None, :, :],
         dims=("event", "channel", "time"),
@@ -187,10 +188,5 @@ def filter_events_df(events_df: pd.DataFrame, trial_types):
     """Delegate to BIDSReader.filter_events_df_by_trial_types."""
     return BIDSReader.filter_events_df_by_trial_types(events_df, trial_types)
 
-def convert_unit(data: Union[mne.io.BaseRaw, mne.Epochs, TimeSeries],
-        target: str,
-        *,
-        current_unit: Optional[str] = None,
-        copy: bool = True,
-        ):
-    return BIDSReader.convert_unit(data, target, current_unit, copy)
+def convert_unit(data, target, *, current_unit=None, copy=True):
+    return BIDSReader.convert_unit(data=data, target=target, current_unit=current_unit, copy=copy)
