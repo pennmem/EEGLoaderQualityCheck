@@ -32,7 +32,7 @@ from ..loaders.bids import (
 from ..preparers.events import dedupe_events_by_sample
 from ..comparators.signal import SignalComparator
 
-from bidsreader import BIDSReader
+from bidsreader import CMLBIDSReader
 
 
 class EpochedPipeline(BasePipeline):
@@ -104,6 +104,9 @@ class EpochedPipeline(BasePipeline):
                     localization=self.localization, montage=self.montage,
                     scheme=scheme,
                 )
+                eeg_all = eeg_all / self.conversion_to_v
+                self._vprint(self.conversion_to_v)
+                self._vprint(eeg_all)
                 self._vprint(f"  CML bulk EEG shape: {eeg_all.shape}")
                 return eeg_all, evs_combined, failed
             except Exception as e:
@@ -179,11 +182,22 @@ class EpochedPipeline(BasePipeline):
                 if len(picks) == 0:
                     picks = np.arange(len(epochs_all.ch_names))
                 epochs_all = epochs_all.pick(picks)
-                epochs_all = convert_unit(epochs_all, "uV", copy=False)
-                epochs_all._data = np.round(epochs_all._data)
+                # epochs_all = convert_unit(epochs_all, "uV", copy=False)
+                # epochs_all._data *= 1e6
                 # epochs_all._data = np.round(epochs_all._data)
+                self._vprint(epochs_all._data)
+
+                # MNE silently drops epochs that extend past the recording.
+                # Filter evs_combined to only the events MNE kept so that
+                # the event dimension matches epochs.get_data().shape[0].
+                kept = epochs_all.selection
+                if len(kept) < len(evs_combined):
+                    n_dropped = len(evs_combined) - len(kept)
+                    self._vprint(f"  MNE dropped {n_dropped} epoch(s) outside recording bounds")
+                    evs_combined = evs_combined.iloc[kept].reset_index(drop=True)
+
                 eeg_all = epochs_to_ptsa(epochs_all, evs_combined)
-                
+
                 eeg_all = eeg_all.assign_coords(time=eeg_all["time"] * 1000.0)
                 eeg_all["time"].attrs["units"] = "ms"
                 self._vprint(f"  BIDS bulk EEG shape: {eeg_all.shape}")
@@ -231,8 +245,8 @@ class EpochedPipeline(BasePipeline):
         )
         self._vprint(f"  CML events loaded: {len(evs_cml)} rows")
 
-        self._vprint(f"  Loading BIDS events (event_type={self.reader.eeg_type})...")
-        evs_bids = load_bids_events(self.reader, event_type=self.reader.eeg_type)
+        self._vprint(f"  Loading BIDS events (event_type={self.reader.device})...")
+        evs_bids = load_bids_events(self.reader, event_type=self.reader.device)
         self._vprint(f"  BIDS events loaded: {len(evs_bids)} rows")
 
         types_to_run = (
@@ -360,13 +374,13 @@ class EpochedPipeline(BasePipeline):
                         label_a="BIDS", label_b="CMLReader",
                         subject=self.subject, experiment=self.experiment,
                         session=self.session,
+                        acquisition=acq_tag,
                     )
                     self._vprint(f"      Done (ok={result.ok})")
 
                     for key, container in [
                         ("df_raw", all_raw),
-                        ("df_raw_summary", all_summary),
-                        ("df_time", all_time),
+                        ("df_epoch_time", all_time),
                     ]:
                         df = result.extras.get(key)
                         if df is not None and not df.empty:
@@ -380,6 +394,29 @@ class EpochedPipeline(BasePipeline):
                 except Exception as e:
                     self._vprint(f"      FAILED: {repr(e)}")
                     status.append((acq_tag, etype, "fail", repr(e)))
+
+            # ----------------------------------------------------------
+            # All-events-combined comparison
+            # ----------------------------------------------------------
+            if eeg_cml_all is not None and eeg_bids_all is not None:
+                try:
+                    self._vprint(f"    Processing ALL event types combined")
+                    result = comparator.compare(
+                        eeg_bids_all, eeg_cml_all,
+                        label_a="BIDS", label_b="CMLReader",
+                        subject=self.subject, experiment=self.experiment,
+                        session=self.session,
+                        acquisition=acq_tag,
+                    )
+                    df = result.extras.get("df_raw_summary")
+                    if df is not None and not df.empty:
+                        df = df.copy()
+                        df["event_type"] = "ALL"
+                        all_summary.append(df)
+                    status.append((acq_tag, "ALL", "ok", ""))
+                except Exception as e:
+                    self._vprint(f"      ALL combined FAILED: {repr(e)}")
+                    status.append((acq_tag, "ALL", "fail", repr(e)))
 
             # ----------------------------------------------------------
             # Cleanup and save
@@ -401,10 +438,10 @@ class EpochedPipeline(BasePipeline):
             self._save_df(df_status, f"df_epoch_status_{tag}_{acq_tag}.csv")
 
             results_all[acq_tag] = {
-                "df_raw": df_raw,
-                "df_raw_summary": df_summary,
-                "df_time": df_time,
-                "status": df_status,
+                "df_epoch": df_raw,
+                "df_epoch_summary": df_summary,
+                "df_epoch_time": df_time,
+                "df_epoch_status": df_status,
             }
 
         return results_all

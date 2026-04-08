@@ -1,7 +1,7 @@
-"""BIDS data loading helpers — uses BIDSReader for all BIDS access.
+"""BIDS data loading helpers — uses CMLBIDSReader for all BIDS access.
 
-BIDSReader API (from bidsreader package):
-    reader = BIDSReader(subject, session, task, root)
+CMLBIDSReader API (from bidsreader package):
+    reader = CMLBIDSReader(subject, session, task, root)
     reader.load_events(event_type=)     -> pd.DataFrame
     reader.load_raw(acquisition=)       -> mne.io.BaseRaw
     reader.load_epochs(tmin, tmax, events=, acquisition=, ...) -> mne.Epochs
@@ -10,9 +10,7 @@ BIDSReader API (from bidsreader package):
     reader.load_combined_channels(acquisition=) -> pd.DataFrame
     reader.is_intracranial()            -> bool
     reader.space                        -> str
-    BIDSReader.mne_epochs_to_ptsa(epochs, events) -> TimeSeries
-    BIDSReader.mne_raw_to_ptsa(raw)     -> TimeSeries
-    BIDSReader.filter_by_trial_types(...)
+    reader.device                       -> str ("eeg" or "ieeg")
 """
 
 from __future__ import annotations
@@ -27,7 +25,14 @@ from ptsa.data.timeseries import TimeSeries
 
 import sys
 sys.path.append("/home1/zrentala/bidsreader")
-from bidsreader import BIDSReader
+from bidsreader import (
+    CMLBIDSReader,
+    mne_raw_to_ptsa,
+    mne_epochs_to_ptsa,
+    filter_by_trial_types as _filter_by_trial_types,
+    filter_events_df_by_trial_types as _filter_events_df_by_trial_types,
+    convert_unit as _convert_unit,
+)
 
 
 # ======================================================================
@@ -39,9 +44,9 @@ def get_reader(
     experiment: str,
     session: Union[str, int],
     bids_root: str,
-) -> BIDSReader:
-    """Create a BIDSReader for the given session."""
-    reader = BIDSReader(
+) -> CMLBIDSReader:
+    """Create a CMLBIDSReader for the given session."""
+    reader = CMLBIDSReader(
         subject=subject,
         session=session,
         task=experiment,
@@ -57,18 +62,18 @@ def get_reader(
 # ======================================================================
 
 def load_bids_events(
-    reader: BIDSReader,
+    reader: CMLBIDSReader,
     *,
     event_type: str = "beh",
 ) -> pd.DataFrame:
-    """Load BIDS events via BIDSReader.
+    """Load BIDS events via CMLBIDSReader.
 
     Parameters
     ----------
-    reader : BIDSReader
+    reader : CMLBIDSReader
         Pre-configured reader.
     event_type : str
-        "beh" for behavioral events, or the eeg_type ("eeg"/"ieeg") for
+        "beh" for behavioral events, or the device ("eeg"/"ieeg") for
         EEG-aligned events.
     """
     return reader.load_events(event_type=event_type)
@@ -79,11 +84,11 @@ def load_bids_events(
 # ======================================================================
 
 def load_bids_raw(
-    reader: BIDSReader,
+    reader: CMLBIDSReader,
     *,
     acquisition: Optional[str] = None,
 ) -> mne.io.BaseRaw:
-    """Load a BIDS raw object via BIDSReader."""
+    """Load a BIDS raw object via CMLBIDSReader."""
     return reader.load_raw(acquisition=acquisition)
 
 
@@ -111,8 +116,8 @@ def raw_to_ptsa(
     raw: mne.io.BaseRaw,
     **kwargs,
 ):
-    """Convert MNE Raw to PTSA TimeSeries via BIDSReader static method."""
-    return BIDSReader.mne_raw_to_ptsa(raw, **kwargs)
+    """Convert MNE Raw to PTSA TimeSeries."""
+    return mne_raw_to_ptsa(raw, **kwargs)
 
 
 # ======================================================================
@@ -120,7 +125,7 @@ def raw_to_ptsa(
 # ======================================================================
 
 def load_bids_epochs(
-    reader: BIDSReader,
+    reader: CMLBIDSReader,
     tmin: float,
     tmax: float,
     *,
@@ -130,7 +135,7 @@ def load_bids_epochs(
     preload: bool = True,
     channels: Optional[list] = None,
 ) -> mne.Epochs:
-    """Load BIDS epochs via BIDSReader.load_epochs."""
+    """Load BIDS epochs via CMLBIDSReader.load_epochs."""
     return reader.load_epochs(
         tmin=tmin,
         tmax=tmax,
@@ -146,47 +151,47 @@ def epochs_to_ptsa(
     epochs: mne.Epochs,
     events: pd.DataFrame,
 ):
-    """Convert MNE Epochs to PTSA TimeSeries via BIDSReader static method."""
-    return BIDSReader.mne_epochs_to_ptsa(epochs, events)
+    """Convert MNE Epochs to PTSA TimeSeries."""
+    return mne_epochs_to_ptsa(epochs, events)
 
 
 # ======================================================================
 # Electrodes / channels
 # ======================================================================
 
-def load_bids_electrodes(reader: BIDSReader) -> pd.DataFrame:
-    """Load electrodes.tsv via BIDSReader."""
+def load_bids_electrodes(reader: CMLBIDSReader) -> pd.DataFrame:
+    """Load electrodes.tsv via CMLBIDSReader."""
     return reader.load_electrodes()
 
 
 def load_bids_channels(
-    reader: BIDSReader,
+    reader: CMLBIDSReader,
     acquisition: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Load channels.tsv via BIDSReader."""
+    """Load channels.tsv via CMLBIDSReader."""
     return reader.load_channels(acquisition=acquisition)
 
 
 def load_bids_combined_channels(
-    reader: BIDSReader,
+    reader: CMLBIDSReader,
     acquisition: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Load combined channels + electrodes via BIDSReader."""
+    """Load combined channels + electrodes via CMLBIDSReader."""
     return reader.load_combined_channels(acquisition=acquisition)
 
 
 # ======================================================================
-# Filtering helpers (delegate to BIDSReader static methods)
+# Filtering helpers (delegate to bidsreader standalone functions)
 # ======================================================================
 
 def filter_by_trial_types(trial_types, **kwargs):
-    """Delegate to BIDSReader.filter_by_trial_types."""
-    return BIDSReader.filter_by_trial_types(trial_types, **kwargs)
+    """Delegate to bidsreader.filter_by_trial_types."""
+    return _filter_by_trial_types(trial_types, **kwargs)
 
 
 def filter_events_df(events_df: pd.DataFrame, trial_types):
-    """Delegate to BIDSReader.filter_events_df_by_trial_types."""
-    return BIDSReader.filter_events_df_by_trial_types(events_df, trial_types)
+    """Delegate to bidsreader.filter_events_df_by_trial_types."""
+    return _filter_events_df_by_trial_types(events_df, trial_types)
 
 def convert_unit(data, target, *, current_unit=None, copy=True):
-    return BIDSReader.convert_unit(data=data, target=target, current_unit=current_unit, copy=copy)
+    return _convert_unit(data=data, target=target, current_unit=current_unit, copy=copy)

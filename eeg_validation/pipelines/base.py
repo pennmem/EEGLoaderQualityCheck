@@ -1,14 +1,20 @@
-"""Base pipeline with shared save/skip logic and a BIDSReader instance."""
+"""Base pipeline with shared save/skip logic and a CMLBIDSReader instance."""
 
 from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
+from functools import cached_property
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import pandas as pd
 
 from ..loaders.bids import get_reader
+
+_UNIT_CONVERSIONS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+    "system_1_unit_conversions.csv",
+)
 
 
 class BasePipeline(ABC):
@@ -73,6 +79,30 @@ class BasePipeline(ABC):
     def acq_label(self) -> str:
         """Short label for file naming — 'contacts', 'pairs', or 'eeg'."""
         return self.acquisition or "eeg"
+
+    @cached_property
+    def conversion_to_v(self) -> float:
+        """Divisor to convert raw CML ADC values to µV.
+
+        Looks up ``conversion_to_V`` from the unit conversions CSV and
+        returns ``conversion_to_V / 1e6`` so that ``data / scale`` gives µV.
+        Falls back to 1.0 (no conversion) if no match is found.
+        """
+        default = 1e6
+        if not os.path.exists(_UNIT_CONVERSIONS_PATH):
+            return default
+        df = pd.read_csv(_UNIT_CONVERSIONS_PATH)
+        match = df[
+            (df["subject"] == self.subject)
+            & (df["experiment"] == self.experiment)
+            & (df["session"] == int(self.session))
+        ]
+        if match.empty:
+            self._vprint(f"  WARNING: No unit conversion found for {self.subject}/{self.experiment}/{self.session}, assuming raw=µV")
+            return default
+        conversion_to_v = float(match.iloc[0]["conversion_to_V"])
+    
+        return conversion_to_v
 
     # ------------------------------------------------------------------
     # Template method

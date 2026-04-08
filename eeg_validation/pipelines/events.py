@@ -39,7 +39,7 @@ class EventsPipeline(BasePipeline):
         # Load BIDS events via BIDSReader
         self._vprint(f"  Loading BIDS events...")
         try:
-            evs_bids = load_bids_events(reader=self.reader, event_type=self.reader.eeg_type)
+            evs_bids = load_bids_events(reader=self.reader, event_type=self.reader.device)
         except Exception as e:
             self._vprint(f"  BIDS events not found: {e}")
             return {"skipped": True, "reason": "bids_events_not_found", "error": str(e)}

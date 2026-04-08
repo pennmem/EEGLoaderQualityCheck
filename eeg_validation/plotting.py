@@ -20,6 +20,8 @@ def plot_comparison_results(
     subjects = df_results["subject"].unique()
     experiments = df_results["experiment"].unique()
 
+    loads_o_subjects = len(subjects) > 6
+
     for experiment in experiments:
         n = len(comparisons)
         fig, axes = plt.subplots(1, n, figsize=(6 * n, 5), sharex=True)
@@ -36,7 +38,8 @@ def plot_comparison_results(
                 if subj_df.empty:
                     continue
 
-                (line,) = ax.plot(subj_df["session"], subj_df[col_tgt], marker="o", label=subj)
+                label_subj = None if loads_o_subjects else subj
+                (line,) = ax.plot(subj_df["session"], subj_df[col_tgt], marker="o", label=label_subj)
 
                 if col_std is not None and col_std in subj_df.columns:
                     ax.fill_between(
@@ -54,7 +57,8 @@ def plot_comparison_results(
                 ylabel += r" ($\pm$ Std)"
             if i == 0:
                 ax.set_ylabel(ylabel)
-            ax.legend(title="Subject")
+            if loads_o_subjects:
+                ax.legend(title="Subject")
 
         plt.tight_layout()
         plt.show()

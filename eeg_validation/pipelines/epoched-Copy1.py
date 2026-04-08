@@ -25,7 +25,7 @@ from ..loaders.bids import (
 from ..preparers.events import dedupe_events_by_sample
 from ..comparators.signal import SignalComparator
 
-from bidsreader import BIDSReader
+from bidsreader import CMLBIDSReader
 import os
 
 
@@ -74,8 +74,8 @@ class EpochedPipeline(BasePipeline):
         self._vprint(f"  CML events loaded: {len(evs_cml)} rows")
 
         # Load BIDS events once (EEG-aligned events with sample/trial_type columns)
-        self._vprint(f"  Loading BIDS events (event_type={self.reader.eeg_type})...")
-        evs_bids = load_bids_events(self.reader, event_type=self.reader.eeg_type)
+        self._vprint(f"  Loading BIDS events (event_type={self.reader.device})...")
+        evs_bids = load_bids_events(self.reader, event_type=self.reader.device)
         self._vprint(f"  BIDS events loaded: {len(evs_bids)} rows, columns={list(evs_bids.columns)}")
 
         types_to_run = (

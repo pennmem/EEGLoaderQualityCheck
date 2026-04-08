@@ -114,6 +114,7 @@ class SignalComparator(Comparator):
         subject: Optional[str] = None,
         experiment: Optional[str] = None,
         session: Optional[Union[str, int]] = None,
+        acquisition: Optional[str] = None,
         compare_signals: bool = True,
         compare_time: bool = True,
     ) -> ComparisonResult:
@@ -121,6 +122,13 @@ class SignalComparator(Comparator):
         # Standardize
         a = self._prepare(da_a)
         b = self._prepare(da_b)
+
+        # Determine acquisition tag: "scalp" for scalp EEG, otherwise
+        # pass through the value (e.g. "monopolar", "bipolar").
+        if acquisition is None or acquisition.lower() in ("eeg", "scalp"):
+            acq_tag = "scalp"
+        else:
+            acq_tag = acquisition  # "monopolar" or "bipolar"
 
         extras: Dict[str, Any] = {}
         extras["channel_overlap"] = channel_overlap_summary(a, b)
@@ -131,14 +139,14 @@ class SignalComparator(Comparator):
 
         if compare_signals:
             df_sig, df_sig_summary = self._compare_signals(
-                a, b, label_a, label_b, subject, experiment, session
+                a, b, label_a, label_b, subject, experiment, session, acq_tag
             )
             frames_signal.append(df_sig)
             frames_signal_summary.append(df_sig_summary)
 
         if compare_time:
             df_time = self._compare_time(
-                a, b, label_a, label_b, subject, experiment, session
+                a, b, label_a, label_b, subject, experiment, session, acq_tag
             )
             frames_time.append(df_time)
 
@@ -172,7 +180,7 @@ class SignalComparator(Comparator):
     # Compare raw signals (per channel × event)
     # ------------------------------------------------------------------
     def _compare_signals(
-        self, da_a, da_b, label_a, label_b, subject, experiment, session
+        self, da_a, da_b, label_a, label_b, subject, experiment, session, acq_tag="scalp"
     ):
         common_ch = np.intersect1d(
             da_a["channel"].astype(str).values,
@@ -217,6 +225,7 @@ class SignalComparator(Comparator):
                     "subject": subject,
                     "experiment": experiment,
                     "session": session,
+                    "acquisition": acq_tag,
                     "comparison": f"{label_a} vs {label_b}",
                     "channel": str(ch),
                     "event": int(ev_i),
@@ -257,6 +266,7 @@ class SignalComparator(Comparator):
             "close_diff_event_indices": close_diff_events,
             "exact_diff_channels": exact_fail,
             "close_diff_channels": close_fail,
+            "acquisition": acq_tag
         }])
 
         return df_detail, df_summary
@@ -265,7 +275,7 @@ class SignalComparator(Comparator):
     # Compare time coordinates
     # ------------------------------------------------------------------
     def _compare_time(
-        self, da_a, da_b, label_a, label_b, subject, experiment, session
+        self, da_a, da_b, label_a, label_b, subject, experiment, session, acq_tag="scalp"
     ):
         t_a = np.asarray(da_a["time"].values if "time" in da_a.coords else np.arange(da_a.sizes["time"], dtype=float))
         t_b = np.asarray(da_b["time"].values if "time" in da_b.coords else np.arange(da_b.sizes["time"], dtype=float))
@@ -295,6 +305,7 @@ class SignalComparator(Comparator):
             "subject": subject,
             "experiment": experiment,
             "session": session,
+            "acquisition": acq_tag,
             "comparison": f"{label_a} vs {label_b}",
             "time_len_a": int(da_a.sizes["time"]),
             "time_len_b": int(da_b.sizes["time"]),
