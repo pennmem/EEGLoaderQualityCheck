@@ -18,6 +18,7 @@ from .pipelines.events import EventsPipeline
 from .pipelines.raw_signal import RawSignalPipeline
 from .pipelines.epoched import EpochedPipeline
 from .pipelines.montage import MontagePipeline
+from .pipelines.digital_signal import DigitalSignalPipeline
 
 __all__ = [
     "ComparisonResult",
@@ -27,4 +28,5 @@ __all__ = [
     "RawSignalPipeline",
     "EpochedPipeline",
     "MontagePipeline",
+    "DigitalSignalPipeline"
 ]

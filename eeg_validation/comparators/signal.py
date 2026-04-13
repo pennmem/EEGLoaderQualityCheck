@@ -44,6 +44,35 @@ def ensure_dims(
     return da.transpose(event_dim, channel_dim, time_dim)
 
 
+def _affine_residual_mse(a: np.ndarray, b: np.ndarray, fallback_mse: float) -> float:
+    """Per-channel MSE after fitting ``a ≈ m*b + c`` by least squares.
+
+    The structural BDF / EDF gain+offset floor between two readers of the
+    same recording is *exactly* an affine transform of the underlying
+    samples. Subtracting the best-fit affine reconstruction isolates the
+    residual disagreement that no calibration choice can explain.
+
+    Returns ``fallback_mse`` if the fit cannot be performed (too few finite
+    samples, or B is constant).
+    """
+    a_flat = np.asarray(a, dtype=float).ravel()
+    b_flat = np.asarray(b, dtype=float).ravel()
+    mask = np.isfinite(a_flat) & np.isfinite(b_flat)
+    if mask.sum() < 2:
+        return fallback_mse
+    am = a_flat[mask]
+    bm = b_flat[mask]
+    if not np.any(bm != bm[0]):  # b is constant -> fit is degenerate
+        return fallback_mse
+    M = np.vstack([bm, np.ones_like(bm)]).T
+    try:
+        (slope, intercept), *_ = np.linalg.lstsq(M, am, rcond=None)
+    except np.linalg.LinAlgError:
+        return fallback_mse
+    residual = am - (slope * bm + intercept)
+    return float(np.mean(residual ** 2))
+
+
 def channel_overlap_summary(
     a: xr.DataArray, b: xr.DataArray, channel_dim: str = "channel"
 ) -> Dict[str, Any]:
@@ -77,6 +106,22 @@ class SignalComparator(Comparator):
     - Raw signals  (channel × time per event)
     - Time coordinate alignment
     - Pairwise channel statistics
+
+    Notes on the BDF / EDF microvolt floor
+    --------------------------------------
+    EDF/BDF stores per-channel ``physical_min`` and ``physical_max`` as
+    8-character ASCII fields, so any reader of a BDF-backed dataset
+    reconstructs samples through a gain that is rounded relative to the
+    "true" calibration. When two pipelines load the same recording through
+    two independently-derived gains (e.g. CMLReader applies a sidecar
+    calibration to int16 split files while a BIDS BDF was re-encoded with
+    its own header), the per-sample disagreement is dominated by an
+    *affine* term ``a ≈ m * b + c``. To distinguish this structural floor
+    from real disagreement we per-channel fit a least-squares line
+    ``a = m*b + c`` and report the residual energy as ``mse_excess``.
+    ``mse_excess ≈ 0`` means the two readers agree up to a linear gain
+    + offset transformation; ``mse_excess > 0`` indicates real
+    sample-by-sample disagreement that no calibration choice can explain.
 
     Parameters
     ----------
@@ -193,6 +238,12 @@ class SignalComparator(Comparator):
         exact_fail = []
         close_fail = []
 
+        # Per-channel aggregates aligned with `common_ch`.
+        channel_means: List[float] = []
+        channel_stds: List[float] = []
+        channel_mse: List[float] = []
+        channel_mse_excess: List[float] = []
+
         for ch in common_ch:
             a = np.squeeze(np.asarray(da_a.sel(channel=ch).data))
             b = np.squeeze(np.asarray(da_b.sel(channel=ch).data))
@@ -220,6 +271,15 @@ class SignalComparator(Comparator):
             diff = np.where(both_nan | np.isnan(a2) | np.isnan(b2), np.nan, a2 - b2)
             abs_diff = np.abs(diff)
 
+            # Per-channel mean / std of the B (BIDS) signal across all events × time.
+            channel_means.append(float(np.nanmean(b2)))
+            channel_stds.append(float(np.nanstd(b2)))
+
+            # Per-channel mse and the affine-residual mse_excess.
+            ch_mse = float(np.nanmean(diff ** 2))
+            channel_mse.append(ch_mse)
+            channel_mse_excess.append(_affine_residual_mse(a2, b2, ch_mse))
+
             for ev_i in range(E):
                 rows.append({
                     "subject": subject,
@@ -246,6 +306,12 @@ class SignalComparator(Comparator):
             vals = pd.to_numeric(series, errors="coerce")
             return float(fn(vals)) if np.isfinite(vals).any() else np.nan
 
+        # Scalar mse_excess: mean across channels of the affine-residual mse.
+        if channel_mse_excess:
+            mse_excess_scalar = float(np.nanmean(channel_mse_excess))
+        else:
+            mse_excess_scalar = np.nan
+
         df_summary = pd.DataFrame([{
             "subject": subject,
             "experiment": experiment,
@@ -261,11 +327,17 @@ class SignalComparator(Comparator):
             "mean_signed_diff": _safe(np.nanmean, df_detail["mean_signed_diff"]) if len(df_detail) else np.nan,
             "std_diff": _safe(np.nanmean, df_detail["std_diff"]) if len(df_detail) else np.nan,
             "mse": _safe(np.nanmean, df_detail["mse_channel"]) if len(df_detail) else np.nan,
+            "mse_excess": mse_excess_scalar,
             "n_events": n_events,
             "n_close_diff_events": len(close_diff_events),
             "close_diff_event_indices": close_diff_events,
             "exact_diff_channels": exact_fail,
             "close_diff_channels": close_fail,
+            "common_channels": [str(c) for c in common_ch],
+            "channel_means": channel_means,
+            "channel_stds": channel_stds,
+            "channel_mse": channel_mse,
+            "channel_mse_excess": channel_mse_excess,
             "acquisition": acq_tag
         }])
 

@@ -11,6 +11,10 @@ import pandas as pd
 
 from ..loaders.bids import get_reader
 
+# Path to the per-session unit-conversion CSV. The cascade in
+# ``digital_units.cml_to_volts`` uses this as the step-2 fallback when
+# the source EDF header isn't available; we no longer apply it as a
+# blanket scalar divisor.
 _UNIT_CONVERSIONS_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
     "system_1_unit_conversions.csv",
@@ -81,16 +85,13 @@ class BasePipeline(ABC):
         return self.acquisition or "eeg"
 
     @cached_property
-    def conversion_to_v(self) -> float:
-        """Divisor to convert raw CML ADC values to µV.
-
-        Looks up ``conversion_to_V`` from the unit conversions CSV and
-        returns ``conversion_to_V / 1e6`` so that ``data / scale`` gives µV.
-        Falls back to 1.0 (no conversion) if no match is found.
-        """
-        default = 1e6
+    def csv_conversion_to_V(self) -> Optional[float]:
+        """Raw ``conversion_to_V`` from system_1_unit_conversions.csv,
+        or ``None`` if no row matches. Fed to ``resolve_edf_units`` as
+        the step-2 (CSV inference) input — *not* applied as a blanket
+        divisor."""
         if not os.path.exists(_UNIT_CONVERSIONS_PATH):
-            return default
+            return None
         df = pd.read_csv(_UNIT_CONVERSIONS_PATH)
         match = df[
             (df["subject"] == self.subject)
@@ -98,11 +99,28 @@ class BasePipeline(ABC):
             & (df["session"] == int(self.session))
         ]
         if match.empty:
-            self._vprint(f"  WARNING: No unit conversion found for {self.subject}/{self.experiment}/{self.session}, assuming raw=µV")
-            return default
-        conversion_to_v = float(match.iloc[0]["conversion_to_V"])
-    
-        return conversion_to_v
+            self._vprint(
+                f"  No CSV conversion_to_V row for "
+                f"{self.subject}/{self.experiment}/{self.session}; "
+                f"resolve_edf_units will fall through to derived units"
+            )
+            return None
+        return float(match.iloc[0]["conversion_to_V"])
+
+    def cml_to_volts(self, eeg_cml):
+        """Convert CMLReader integer LSBs to Volts via the writer's
+        per-channel cascade. See :func:`eeg_validation.digital_units.cml_to_volts`."""
+        from ..digital_units import cml_to_volts as _cml_to_volts
+        out = _cml_to_volts(
+            eeg_cml,
+            subject=self.subject,
+            experiment=self.experiment,
+            session=self.session,
+            conversion_to_V=self.csv_conversion_to_V,
+            container="EDF",
+        )
+        self._vprint(f"  cml_to_volts units_status={out.attrs.get('units_status')}")
+        return out
 
     # ------------------------------------------------------------------
     # Template method

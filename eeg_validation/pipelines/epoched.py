@@ -66,7 +66,7 @@ class EpochedPipeline(BasePipeline):
         paths = []
         tag = self.session_tag
         for acq in acqs:
-            for prefix in ("df_epoch", "df_epoch_summary", "df_epoch_time", "df_epoch_status"):
+            for prefix in ("df_epoch_summary", "df_epoch_status"):
                 paths.append(os.path.join(self.out_path, f"{prefix}_{tag}_{acq}.csv"))
         return paths
 
@@ -104,9 +104,7 @@ class EpochedPipeline(BasePipeline):
                     localization=self.localization, montage=self.montage,
                     scheme=scheme,
                 )
-                eeg_all = eeg_all / self.conversion_to_v
-                self._vprint(self.conversion_to_v)
-                self._vprint(eeg_all)
+                eeg_all = self.cml_to_volts(eeg_all)
                 self._vprint(f"  CML bulk EEG shape: {eeg_all.shape}")
                 return eeg_all, evs_combined, failed
             except Exception as e:
@@ -315,7 +313,7 @@ class EpochedPipeline(BasePipeline):
             # ----------------------------------------------------------
             # Bulk load with retry
             # ----------------------------------------------------------
-            all_raw, all_summary, all_time, status = [], [], [], []
+            all_summary, status = [], []
 
             eeg_cml_all, evs_cml_combined, failed_cml = self._bulk_load_cml(
                 cml_events_by_type, types_to_run, scheme, status, acq_tag,
@@ -378,16 +376,12 @@ class EpochedPipeline(BasePipeline):
                     )
                     self._vprint(f"      Done (ok={result.ok})")
 
-                    for key, container in [
-                        ("df_raw", all_raw),
-                        ("df_epoch_time", all_time),
-                    ]:
-                        df = result.extras.get(key)
-                        if df is not None and not df.empty:
-                            df = df.copy()
-                            df["event_type"] = etype
-                            df["acquisition"] = acq_tag
-                            container.append(df)
+                    df_sum = result.extras.get("df_raw_summary")
+                    if df_sum is not None and not df_sum.empty:
+                        df_sum = df_sum.copy()
+                        df_sum["event_type"] = etype
+                        df_sum["acquisition"] = acq_tag
+                        all_summary.append(df_sum)
 
                     status.append((acq_tag, etype, "ok", ""))
 
@@ -427,20 +421,14 @@ class EpochedPipeline(BasePipeline):
             self._vprint(f"\n  Saving results for {acq_tag}...")
             tag = self.session_tag
 
-            df_raw = pd.concat(all_raw, ignore_index=True) if all_raw else pd.DataFrame()
             df_summary = pd.concat(all_summary, ignore_index=True) if all_summary else pd.DataFrame()
-            df_time = pd.concat(all_time, ignore_index=True) if all_time else pd.DataFrame()
             df_status = pd.DataFrame(status, columns=["acquisition", "event_type", "status", "detail"])
 
-            self._save_df(df_raw, f"df_epoch_{tag}_{acq_tag}.csv")
             self._save_df(df_summary, f"df_epoch_summary_{tag}_{acq_tag}.csv")
-            self._save_df(df_time, f"df_epoch_time_{tag}_{acq_tag}.csv")
             self._save_df(df_status, f"df_epoch_status_{tag}_{acq_tag}.csv")
 
             results_all[acq_tag] = {
-                "df_epoch": df_raw,
                 "df_epoch_summary": df_summary,
-                "df_epoch_time": df_time,
                 "df_epoch_status": df_status,
             }
 

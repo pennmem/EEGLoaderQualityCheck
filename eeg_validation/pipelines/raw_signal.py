@@ -23,9 +23,7 @@ class RawSignalPipeline(BasePipeline):
         tag = self.session_tag
         acq = self.acq_label
         return [
-            os.path.join(self.out_path, f"df_raw_{tag}_{acq}.csv"),
             os.path.join(self.out_path, f"df_raw_summary_{tag}_{acq}.csv"),
-            os.path.join(self.out_path, f"df_raw_time_{tag}_{acq}.csv"),
         ]
 
     def _run(self) -> Dict[str, Any]:
@@ -48,10 +46,7 @@ class RawSignalPipeline(BasePipeline):
             localization=self.localization, montage=self.montage,
             scheme=scheme,
         )
-        eeg_cml = eeg_cml / self.conversion_to_v
-        self._vprint(self.conversion_to_v)
-        self._vprint(eeg_cml)
-        
+        eeg_cml = self.cml_to_volts(eeg_cml)
         self._vprint(f"  CML raw EEG shape: {eeg_cml.shape}")
 
         # BIDS raw
@@ -81,8 +76,6 @@ class RawSignalPipeline(BasePipeline):
 
         tag = self.session_tag
         acq = self.acq_label
-        self._save_df(result.extras["df_raw"], f"df_raw_{tag}_{acq}.csv")
         self._save_df(result.extras["df_raw_summary"], f"df_raw_summary_{tag}_{acq}.csv")
-        self._save_df(result.extras["df_time"], f"df_raw_time_{tag}_{acq}.csv")
 
         return result

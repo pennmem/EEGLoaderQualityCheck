@@ -20,7 +20,7 @@ def plot_comparison_results(
     subjects = df_results["subject"].unique()
     experiments = df_results["experiment"].unique()
 
-    loads_o_subjects = len(subjects) > 6
+    loads_o_subjects = len(subjects) > 100
 
     for experiment in experiments:
         n = len(comparisons)
@@ -57,7 +57,7 @@ def plot_comparison_results(
                 ylabel += r" ($\pm$ Std)"
             if i == 0:
                 ax.set_ylabel(ylabel)
-            if loads_o_subjects:
+            if not loads_o_subjects:
                 ax.legend(title="Subject")
 
         plt.tight_layout()
