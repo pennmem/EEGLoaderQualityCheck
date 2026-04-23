@@ -12,8 +12,8 @@ import pandas as pd
 
 from .base import BasePipeline
 from ..loaders.cml import load_cml_contacts_and_pairs
-from ..loaders.bids import load_bids_electrodes, load_bids_channels
-from ..preparers.montage import prep_contacts, prep_pairs
+from ..loaders.bids import load_bids_channels
+from ..preparers.montage import prep_contacts, prep_pairs, BIDS_TO_CML_SPACE
 from ..comparators.dataframe import DataFrameComparator
 
 
@@ -32,7 +32,7 @@ class MontagePipeline(BasePipeline):
     def _output_paths(self) -> List[str]:
         tag = self.session_tag
         acq = self.acq_label
-        return [self._make_path(f"df_montage_summary_{acq}")]
+        return [self._make_path(f"df_montage_status_{acq}")]
 
     def _run(self) -> Dict[str, Any]:
         self._vprint(f"  Loading CML contacts and pairs...")
@@ -51,74 +51,107 @@ class MontagePipeline(BasePipeline):
 
         tag = self.session_tag
         acq = self.acq_label
+        suffix = "contacts" if self.acquisition == "contacts" else "pairs"
 
-        # Load electrodes (needed for both contacts and pairs)
-        self._vprint(f"  Loading BIDS electrodes...")
-        elec = load_bids_electrodes(self.reader)
-        elec_space = self.reader.space or "unknown"
-        self._vprint(f"  BIDS electrodes loaded: {len(elec)} contacts, space='{elec_space}'")
+        # Enumerate every space BIDS has for this session.
+        spaces = self.reader.list_available_spaces()
+        if not spaces:
+            fallback = self.reader.space
+            spaces = [fallback] if fallback else []
+        self._vprint(f"  BIDS spaces available: {spaces}")
 
-        result = {}
-
-        if self.acquisition == "contacts":
-            self._vprint(f"\n  --- Contacts comparison ---")
-            contact_bids = prep_contacts(elec, elec_space=elec_space)
-            self._vprint(f"  Prepped BIDS contacts: {len(contact_bids)} rows")
-
-            self._vprint(f"  Comparing CML vs BIDS contacts...")
-            res = comparator.compare(
-                contacts_cml, contact_bids,
-                label_a="CML", label_b="BIDS",
-                subject=self.subject, experiment=self.experiment,
-                session=self.session, return_aligned=True,
-            )
-            self._vprint(f"  Contacts comparison complete (ok={res.ok})")
-
-            self._save_df(res.df_summary, f"df_contacts_summary_{tag}.csv")
-            self._save_df(res.df_detail, f"df_contacts_column_summary_{tag}.csv")
-            self._save_df(res.df_mismatches, f"df_contacts_mismatches_{tag}.csv")
-            result = res
-
-        elif self.acquisition == "pairs":
-            self._vprint(f"\n  --- Pairs comparison ---")
+        # For pairs we need bipolar channels once; skip the whole run if missing.
+        ch_bip = None
+        if self.acquisition == "pairs":
             self._vprint(f"  Loading BIDS bipolar channels...")
             ch_bip = load_bids_channels(self.reader, acquisition="bipolar")
             ch_bip = ch_bip[ch_bip["name"].astype(str).str.contains("-")]
             self._vprint(f"  Bipolar channels found: {len(ch_bip)}")
 
-            if ch_bip.empty:
-                self._vprint(f"  Skipped: no bipolar channels")
-                result = {"skipped": True, "reason": "no_bipolar_channels"}
-            elif pairs_cml is None or pairs_cml.empty:
-                self._vprint(f"  Skipped: no CML pairs data")
-                result = {"skipped": True, "reason": "no_cml_pairs"}
-            else:
-                pairs_bids = prep_pairs(elec, ch_bip, elec_space=elec_space)
-                self._vprint(f"  Prepped BIDS pairs: {len(pairs_bids)} rows")
+        per_summary: List[pd.DataFrame] = []
+        per_detail: List[pd.DataFrame] = []
+        per_mismatches: List[pd.DataFrame] = []
+        montage_rows: List[Dict[str, Any]] = []
+        last_res = None
 
-                self._vprint(f"  Comparing CML vs BIDS pairs...")
+        for bids_space in spaces:
+            cml_key = BIDS_TO_CML_SPACE.get(bids_space)
+            if cml_key is None:
+                self._vprint(f"  WARNING: unknown BIDS space '{bids_space}' — skipping")
+                montage_rows.append({
+                    "subject": self.subject, "experiment": self.experiment,
+                    "session": self.session, "acquisition": acq,
+                    "space": bids_space, "skipped": True, "reason": "unknown_space",
+                })
+                continue
+
+            self._vprint(f"\n  --- {suffix} comparison for space={bids_space} (cml_key={cml_key}) ---")
+            try:
+                elec = self.reader.load_electrodes(space=bids_space)
+            except Exception as e:
+                self._vprint(f"  WARNING: load_electrodes(space={bids_space}) failed: {e}")
+                montage_rows.append({
+                    "subject": self.subject, "experiment": self.experiment,
+                    "session": self.session, "acquisition": acq,
+                    "space": bids_space, "skipped": True, "reason": f"load_failed: {e}",
+                })
+                continue
+
+            if self.acquisition == "contacts":
+                df_bids = prep_contacts(elec, cml_key=cml_key)
                 res = comparator.compare(
-                    pairs_cml, pairs_bids,
-                    label_a="CML", label_b="BIDS",
+                    contacts_cml, df_bids,
+                    label_a="CML", label_b="BIDS", space=bids_space,
                     subject=self.subject, experiment=self.experiment,
                     session=self.session, return_aligned=True,
                 )
-                self._vprint(f"  Pairs comparison complete (ok={res.ok})")
+            else:  # pairs
+                if ch_bip is None or ch_bip.empty:
+                    self._vprint(f"  Skipped: no bipolar channels")
+                    montage_rows.append({
+                        "subject": self.subject, "experiment": self.experiment,
+                        "session": self.session, "acquisition": acq,
+                        "space": bids_space, "skipped": True, "reason": "no_bipolar_channels",
+                    })
+                    continue
+                if pairs_cml is None or pairs_cml.empty:
+                    self._vprint(f"  Skipped: no CML pairs data")
+                    montage_rows.append({
+                        "subject": self.subject, "experiment": self.experiment,
+                        "session": self.session, "acquisition": acq,
+                        "space": bids_space, "skipped": True, "reason": "no_cml_pairs",
+                    })
+                    continue
+                df_bids = prep_pairs(elec, ch_bip, cml_key=cml_key)
+                res = comparator.compare(
+                    pairs_cml, df_bids,
+                    label_a="CML", label_b="BIDS", space=bids_space,
+                    subject=self.subject, experiment=self.experiment,
+                    session=self.session, return_aligned=True,
+                )
 
-                self._save_df(res.df_summary, f"df_pairs_summary_{tag}.csv")
-                self._save_df(res.df_detail, f"df_pairs_column_summary_{tag}.csv")
-                self._save_df(res.df_mismatches, f"df_pairs_mismatches_{tag}.csv")
-                result = res
+            self._vprint(f"  space={bids_space} ok={res.ok}")
+            per_summary.append(res.df_summary)
+            per_detail.append(res.df_detail)
+            per_mismatches.append(res.df_mismatches)
+            montage_rows.append({
+                "subject": self.subject, "experiment": self.experiment,
+                "session": self.session, "acquisition": acq,
+                "space": bids_space, "skipped": False, "reason": "",
+            })
+            last_res = res
 
-        # Summary marker
-        skipped = isinstance(result, dict) and result.get("skipped", False)
-        pd.DataFrame([{
-            "subject": self.subject,
-            "experiment": self.experiment,
-            "session": self.session,
-            "acquisition": acq,
-            "electrodes_space_used": elec_space,
-            "skipped": skipped,
-        }]).to_csv(self._make_path(f"df_montage_summary_{acq}"), index=False)
+        # Write concatenated per-session outputs (one row per space).
+        if per_summary:
+            self._save_df(pd.concat(per_summary, ignore_index=True),
+                          f"df_{suffix}_summary_{tag}.csv")
+            self._save_df(pd.concat(per_detail, ignore_index=True),
+                          f"df_{suffix}_column_summary_{tag}.csv")
+            self._save_df(pd.concat(per_mismatches, ignore_index=True),
+                          f"df_{suffix}_mismatches_{tag}.csv")
 
-        return result
+        pd.DataFrame(montage_rows).to_csv(
+            self._make_path(f"df_montage_status_{acq}"), index=False,
+        )
+
+        return last_res if last_res is not None else {"skipped": True, "reason": "no_spaces"}

@@ -24,7 +24,18 @@ import xarray as xr
 from ptsa.data.timeseries import TimeSeries
 
 import sys
-sys.path.append("/home1/zrentala/bidsreader")
+# Must be insert(0, ...) so the local checkout wins over any installed
+# bidsreader in site-packages.
+_BIDSREADER_PATH = "/home1/zrentala/bidsreader"
+if _BIDSREADER_PATH not in sys.path:
+    sys.path.insert(0, _BIDSREADER_PATH)
+# Evict any cached bidsreader imported from elsewhere before this
+# sys.path tweak took effect.
+for _mod in [m for m in list(sys.modules) if m == "bidsreader" or m.startswith("bidsreader.")]:
+    _cached = sys.modules[_mod]
+    _cached_file = getattr(_cached, "__file__", "") or ""
+    if _BIDSREADER_PATH not in _cached_file:
+        del sys.modules[_mod]
 from bidsreader import (
     CMLBIDSReader,
     mne_raw_to_ptsa,

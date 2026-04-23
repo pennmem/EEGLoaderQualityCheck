@@ -7,10 +7,18 @@ import pandas as pd
 
 
 def nan_safe_equal(a: pd.Series, b: pd.Series) -> np.ndarray:
-    """Element-wise equality that treats NaN == NaN as True."""
+    """Element-wise equality that treats NaN == NaN as True.
+
+    Normalises pd.NA / NaT / NaN → None before comparing so the
+    elementwise `==` returns real Python booleans (pd.NA==pd.NA yields
+    pd.NA, which breaks downstream bitwise ops)."""
     a_np = np.asarray(a, dtype=object)
     b_np = np.asarray(b, dtype=object)
-    both_nan = pd.isna(a_np) & pd.isna(b_np)
+    a_mask = pd.isna(a_np)
+    b_mask = pd.isna(b_np)
+    a_np = np.where(a_mask, None, a_np)
+    b_np = np.where(b_mask, None, b_np)
+    both_nan = a_mask & b_mask
     return (a_np == b_np) | both_nan
 
 

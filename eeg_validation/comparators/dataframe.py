@@ -67,6 +67,7 @@ class DataFrameComparator(Comparator):
         subject: Optional[str] = None,
         experiment: Optional[str] = None,
         session: Optional[Union[str, int]] = None,
+        space: Optional[str] = None,
         return_aligned: bool = False,
     ) -> ComparisonResult:
         # Infer metadata if not supplied
@@ -84,7 +85,7 @@ class DataFrameComparator(Comparator):
         only_b = sorted(set(b2.columns) - set(a2.columns) - self.drop_cols)
 
         # Align rows
-        a_aligned, b_aligned, align_mode, sort_keys_used = self._align(
+        a_aligned, b_aligned, _align_mode, _sort_keys_used = self._align(
             a2[shared_cols], b2[shared_cols], shared_cols
         )
 
@@ -122,31 +123,33 @@ class DataFrameComparator(Comparator):
                 differing_cols.append(col)
                 bad_idx = np.where(~ok)[0][: self.max_mismatches]
                 for i in bad_idx:
-                    mismatch_rows.append(
-                        {
-                            "subject": subject,
-                            "experiment": experiment,
-                            "session": session,
-                            "column": col,
-                            "i": int(i),
-                            label_a: sa.iloc[i],
-                            label_b: sb.iloc[i],
-                        }
-                    )
+                    row = {
+                        "subject": subject,
+                        "experiment": experiment,
+                        "session": session,
+                        "column": col,
+                        "i": int(i),
+                        label_a: sa.iloc[i],
+                        label_b: sb.iloc[i],
+                    }
+                    if space is not None:
+                        row["space"] = space
+                    mismatch_rows.append(row)
 
-            col_rows.append(
-                {
-                    "subject": subject,
-                    "experiment": experiment,
-                    "session": session,
-                    "column": col,
-                    "n_mismatches": n_bad,
-                    "fraction_mismatch": (n_bad / n) if n else np.nan,
-                    "dtype_a": str(sa.dtype),
-                    "dtype_b": str(sb.dtype),
-                    "numeric_compared_with_isclose": used_isclose,
-                }
-            )
+            col_row = {
+                "subject": subject,
+                "experiment": experiment,
+                "session": session,
+                "column": col,
+                "n_mismatches": n_bad,
+                "fraction_mismatch": (n_bad / n) if n else np.nan,
+                "dtype_a": str(sa.dtype),
+                "dtype_b": str(sb.dtype),
+                "numeric_compared_with_isclose": used_isclose,
+            }
+            if space is not None:
+                col_row["space"] = space
+            col_rows.append(col_row)
 
         df_detail = (
             pd.DataFrame(col_rows)
@@ -163,27 +166,22 @@ class DataFrameComparator(Comparator):
             "subject": subject,
             "experiment": experiment,
             "session": session,
+        }
+        if space is not None:
+            summary["space"] = space
+        summary.update({
             "comparison": f"{label_a} vs {label_b}",
-            "source_a": label_a,
-            "source_b": label_b,
             "n_rows_compared": int(n),
             "n_rows_a": int(n_a),
             "n_rows_b": int(n_b),
             "length_mismatch": bool(length_mismatch),
             "n_columns_compared": len(shared_cols),
-            "n_differing_columns": len(differing_cols),
             "differing_columns": differing_cols,
-            "n_only_in_a": len(only_a),
-            "n_only_in_b": len(only_b),
             "only_in_a": only_a,
             "only_in_b": only_b,
-            "any_mismatch": any_mismatch,
-            "tolerant_numeric": self.tolerant_numeric,
             "numeric_rtol": self.rtol,
             "numeric_atol": self.atol,
-            "sort_keys_used": sort_keys_used,
-            "align_mode": align_mode,
-        }
+        })
 
         result = ComparisonResult(
             ok=not any_mismatch,

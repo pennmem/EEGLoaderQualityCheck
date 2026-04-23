@@ -12,6 +12,23 @@ _TYPE_MAP = {"grid": "G", "depth": "D", "strip": "S", "gird": "G"}
 
 _GROUP_COL_CANDIDATES = ("type", "group", "Group", "electrode_type", "contact_type")
 
+# CML atlas/space key -> BIDS-standard space label. Mirrors
+# bids-convert/intracranial_BIDS_converter.py CML_TO_BIDS_SPACE; kept
+# local so eeg-validation doesn't import from bids-convert.
+# Source of truth: pennmem/neurorad_pipeline RELEASE_NOTES.md.
+CML_TO_BIDS_SPACE = {
+    "mni": "MNI152NLin6ASym",
+    "tal": "Talairach",
+    "avg": "fsaverage",
+    "avg.corrected": "fsaverageBrainshift",
+    "ind": "fsnative",
+    "ind.corrected": "fsnativeBrainshift",
+    "ind.dural": "fsnativeDural",
+    "vox": "Pixels",
+    "t1_mri": "t1MRI",
+}
+BIDS_TO_CML_SPACE = {v: k for k, v in CML_TO_BIDS_SPACE.items()}
+
 
 def _find_group_col(df: pd.DataFrame) -> Optional[str]:
     for cand in _GROUP_COL_CANDIDATES:
@@ -26,23 +43,13 @@ def _norm_group(g, type_map=_TYPE_MAP):
     return type_map.get(str(g).strip().lower().replace("gird", "grid"), pd.NA)
 
 
-def _assign_coords(df: pd.DataFrame, elec_space: str) -> pd.DataFrame:
-    """Rename x/y/z to mni.* or tal.* based on space; fill the other with NA."""
-    if elec_space == "MNI152NLin6ASym":
-        df = df.rename(columns={"x": "mni.x", "y": "mni.y", "z": "mni.z"})
-        for c in ("tal.x", "tal.y", "tal.z"):
-            if c not in df.columns:
-                df[c] = pd.NA
-    elif elec_space == "Talairach":
-        df = df.rename(columns={"x": "tal.x", "y": "tal.y", "z": "tal.z"})
-        for c in ("mni.x", "mni.y", "mni.z"):
-            if c not in df.columns:
-                df[c] = pd.NA
-    else:
-        for c in ("mni.x", "mni.y", "mni.z", "tal.x", "tal.y", "tal.z"):
-            if c not in df.columns:
-                df[c] = pd.NA
-    return df
+def _assign_coords(df: pd.DataFrame, cml_key: str) -> pd.DataFrame:
+    """Rename BIDS electrodes.tsv x/y/z to CML-style {cml_key}.x/y/z."""
+    return df.rename(columns={
+        "x": f"{cml_key}.x",
+        "y": f"{cml_key}.y",
+        "z": f"{cml_key}.z",
+    })
 
 
 def _dedupe_electrodes(elec: pd.DataFrame, label_col: str = "label") -> pd.DataFrame:
@@ -57,8 +64,15 @@ def _dedupe_electrodes(elec: pd.DataFrame, label_col: str = "label") -> pd.DataF
 # Contacts
 # ------------------------------------------------------------------
 
-def prep_contacts(elec: pd.DataFrame, *, elec_space: str) -> pd.DataFrame:
-    """Build a CML contacts-like DataFrame from BIDS electrodes.tsv."""
+_REGION_COLS = ("wb.region", "ind.region", "das.region", "stein.region")
+
+
+def prep_contacts(elec: pd.DataFrame, *, cml_key: str) -> pd.DataFrame:
+    """Build a CML contacts-like DataFrame from BIDS electrodes.tsv
+    for one coordinate space. Only the coord columns for `cml_key` are
+    emitted (e.g. ``mni.x/y/z`` for `cml_key='mni'`). Region columns
+    (``wb.region``/``ind.region``/``das.region``/``stein.region``) are
+    preserved as-is — they are not coordinate-space-specific."""
     out = elec.copy()
 
     # label
@@ -75,17 +89,15 @@ def prep_contacts(elec: pd.DataFrame, *, elec_space: str) -> pd.DataFrame:
     else:
         out["type"] = out[src].astype("string").str.strip().str.lower().map(_TYPE_MAP)
 
-    # coordinates
-    out = _assign_coords(out, elec_space)
-
-    # region
-    if "ind.region" not in out.columns:
-        out["ind.region"] = pd.NA
-
-    cols = ["label", "mni.x", "mni.y", "mni.z", "type", "ind.region", "tal.x", "tal.y", "tal.z"]
-    for c in cols:
+    # coordinates (one space only)
+    out = _assign_coords(out, cml_key)
+    for axis in ("x", "y", "z"):
+        c = f"{cml_key}.{axis}"
         if c not in out.columns:
             out[c] = pd.NA
+
+    cols = ["label", f"{cml_key}.x", f"{cml_key}.y", f"{cml_key}.z", "type"]
+    cols += [c for c in _REGION_COLS if c in out.columns]
     return out[cols]
 
 
@@ -97,13 +109,16 @@ def prep_pairs(
     elec: pd.DataFrame,
     ch_bip: pd.DataFrame,
     *,
-    elec_space: str,
+    cml_key: str,
     label_col_channels: str = "name",
     elec_name_col: str = "name",
-    region_col: str = "ind.region",
     region_mismatch_value: str = "mismatch",
 ) -> pd.DataFrame:
-    """Build a CML pairs-like DataFrame from electrodes + bipolar channels."""
+    """Build a CML pairs-like DataFrame from electrodes + bipolar channels
+    for one coordinate space (keyed by `cml_key`). Coordinates are the
+    midpoint of each pair's two contacts, emitted as {cml_key}.x/y/z.
+    Region columns (wb/ind/das/stein) are preserved as-is when present
+    in electrodes."""
 
     # Normalize electrodes
     elec2 = elec.copy()
@@ -114,12 +129,18 @@ def prep_pairs(
     elec2["label"] = elec2["label"].astype("string").str.strip()
 
     group_col = _find_group_col(elec2)
-    elec2 = _assign_coords(elec2, elec_space)
-    if region_col not in elec2.columns:
-        elec2[region_col] = pd.NA
-
+    elec2 = _assign_coords(elec2, cml_key)
     elec2 = _dedupe_electrodes(elec2, "label")
     elec_idx = elec2.set_index("label", drop=False)
+
+    # NOTE: CML pair-level region labels (ind/das/stein/avg/dk/etc.) are
+    # derived upstream by the neurorad pipeline via atlas lookup at each
+    # pair's midpoint coordinate, NOT from the two contacts' region
+    # labels. We can't reproduce that from contact-level BIDS data
+    # without the atlas volumes, so we omit region columns from the
+    # pairs DataFrame entirely. Regions remain comparable at the
+    # contacts level. See RELEASE_NOTES.md in pennmem/neurorad_pipeline.
+    present_region_cols: list[str] = []
 
     # Parse bipolar labels
     ch2 = ch_bip.copy().rename(columns={label_col_channels: "label"})
@@ -138,36 +159,27 @@ def prep_pairs(
         return (a + b) / 2.0
 
     out = pd.DataFrame({"label": ch2["label"].astype("string").values})
-    for prefix in ("mni", "tal"):
-        for axis in ("x", "y", "z"):
-            c = f"{prefix}.{axis}"
-            out[c] = _mid(c) if c in elec_idx.columns else pd.NA
+    for axis in ("x", "y", "z"):
+        c = f"{cml_key}.{axis}"
+        out[c] = _mid(c) if c in elec_idx.columns else pd.NA
 
-    # type
+    # type (underscore names match CML pairs schema: type_1/type_2)
     if group_col:
-        out["type1"] = e1[group_col].apply(_norm_group).to_numpy()
-        out["type2"] = e2[group_col].apply(_norm_group).to_numpy()
+        out["type_1"] = e1[group_col].apply(_norm_group).to_numpy()
+        out["type_2"] = e2[group_col].apply(_norm_group).to_numpy()
     else:
-        out["type1"] = pd.NA
-        out["type2"] = pd.NA
+        out["type_1"] = pd.NA
+        out["type_2"] = pd.NA
 
-    # region
-    r1 = e1[region_col].astype("string").to_numpy() if region_col in e1.columns else np.full(len(out), pd.NA, dtype=object)
-    r2 = e2[region_col].astype("string").to_numpy() if region_col in e2.columns else np.full(len(out), pd.NA, dtype=object)
-    same = (r1 == r2) & (~pd.isna(r1)) & (~pd.isna(r2))
-    region = np.full(len(out), pd.NA, dtype=object)
-    region[same] = r1[same]
-    region[(~same) & (~pd.isna(r1)) & (~pd.isna(r2))] = region_mismatch_value
-    out["ind.region"] = region
-
-    out["contact1"] = ch2["contact1"].astype("string").values
-    out["contact2"] = ch2["contact2"].astype("string").values
+    # (region columns intentionally omitted — see note above.)
+    # contact_1 / contact_2 are also omitted: CML stores them as integer
+    # contact IDs from the localization JSON, but BIDS electrodes.tsv
+    # exposes only the string label ("name"). We can't reproduce CML's
+    # integer IDs from BIDS alone, so comparing them always fails. The
+    # pair `label` already encodes both contact labels ("LAF1-LAF2").
 
     cols = [
-        "label", "mni.x", "mni.y", "mni.z", "tal.x", "tal.y", "tal.z",
-        "type1", "type2", "ind.region", "contact1", "contact2",
-    ]
-    for c in cols:
-        if c not in out.columns:
-            out[c] = pd.NA
+        "label", f"{cml_key}.x", f"{cml_key}.y", f"{cml_key}.z",
+        "type_1", "type_2",
+    ] + present_region_cols
     return out[cols]
