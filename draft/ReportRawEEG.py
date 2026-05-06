@@ -2083,10 +2083,25 @@ def prep_bids_pairs_from_electrodes_and_bipolar_channels(
     type_map: dict = None,
     region_mismatch_value: str = "mismatch",
 ) -> pd.DataFrame:
-    """
-    Prepare bipolar pairs-like df using:
-      - ch_bip: bipolar channels.tsv (name contains "A-B")
-      - elec: electrodes.tsv (space-aware)
+    """LEGACY. Kept for draft notebooks that still call into this
+    module. New code should use
+    ``eeg_validation.preparers.montage.prep_pairs`` (single-space
+    output matching CML schema), paired with
+    ``eeg_validation.preparers.montage_regions.enrich_pairs_with_cml_regions``
+    to get pair-region labels from the upstream ``pairs.json``.
+
+    The ``ind.region`` column this function synthesizes uses an
+    agree-or-``"mismatch"`` rule on contact-level regions, which does
+    NOT match the neurorad pipeline (which does an independent atlas
+    lookup at the midpoint voxel). Treat the ``ind.region`` column
+    here as a rough contact-level agreement indicator, not a CML pair
+    label.
+
+    Pair-coordinate math here is now routed through
+    ``eeg_validation.preparers._neurorad_algo.pair_coordinate_axis``,
+    a verbatim copy of the neurorad pipeline's
+    ``Localization.get_pair_coordinate``, so the midpoint rule cannot
+    drift from the pipeline.
 
     Output columns:
       - label
@@ -2096,6 +2111,7 @@ def prep_bids_pairs_from_electrodes_and_bipolar_channels(
       - ind.region
       - contact1, contact2
     """
+    from eeg_validation.preparers._neurorad_algo import pair_coordinate_axis
     if type_map is None:
         type_map = {"grid": "G", "depth": "D", "strip": "S", "gird": "G"}
 
@@ -2124,7 +2140,7 @@ def prep_bids_pairs_from_electrodes_and_bipolar_channels(
     def _midpoint(a, b):
         a = pd.to_numeric(a, errors="coerce").to_numpy()
         b = pd.to_numeric(b, errors="coerce").to_numpy()
-        return (a + b) / 2.0
+        return pair_coordinate_axis(a, b)
 
     # ---- normalize electrodes table
     elec2 = elec.copy()

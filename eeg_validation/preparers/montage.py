@@ -1,4 +1,15 @@
-"""Prepare BIDS electrodes/channels into CML-compatible contacts and pairs DataFrames."""
+"""Prepare BIDS electrodes/channels into CML-compatible contacts and pairs DataFrames.
+
+Pair-coordinate math is a verbatim copy of the CML neurorad pipeline's
+``Localization.get_pair_coordinate`` (see :mod:`._neurorad_algo` for the
+source-of-truth pointer). The pipeline computes pair coordinates as
+``(contact1 + contact2) / 2`` in each supported coordinate space; we
+apply the same rule per BIDS space via ``pair_coordinate_axis``.
+Pair-level region labels are not synthesized here — neurorad assigns
+them by independent atlas lookup at the midpoint voxel, which can't be
+reproduced from contact-level BIDS data. Callers that need pair regions
+should use ``enrich_pairs_with_cml_regions`` in :mod:`.montage_regions`.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +18,10 @@ from typing import Dict, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from ._neurorad_algo import pair_coordinate_axis
 
-_TYPE_MAP = {"grid": "G", "depth": "D", "strip": "S", "gird": "G"}
+
+_TYPE_MAP = {"grid": "G", "depth": "D", "strip": "S", "gird": "G", "micro" : "uD"}
 
 _GROUP_COL_CANDIDATES = ("type", "group", "Group", "electrode_type", "contact_type")
 
@@ -128,7 +141,6 @@ def prep_pairs(
         elec2["label"] = pd.NA
     elec2["label"] = elec2["label"].astype("string").str.strip()
 
-    group_col = _find_group_col(elec2)
     elec2 = _assign_coords(elec2, cml_key)
     elec2 = _dedupe_electrodes(elec2, "label")
     elec_idx = elec2.set_index("label", drop=False)
@@ -137,9 +149,11 @@ def prep_pairs(
     # derived upstream by the neurorad pipeline via atlas lookup at each
     # pair's midpoint coordinate, NOT from the two contacts' region
     # labels. We can't reproduce that from contact-level BIDS data
-    # without the atlas volumes, so we omit region columns from the
-    # pairs DataFrame entirely. Regions remain comparable at the
-    # contacts level. See RELEASE_NOTES.md in pennmem/neurorad_pipeline.
+    # without the atlas volumes, so we omit region columns here and
+    # expose them through a separate loader,
+    # ``enrich_pairs_with_cml_regions`` (see ``montage_regions.py``),
+    # which reads the upstream pairs.json via cmlreaders and joins on
+    # pair label.
     present_region_cols: list[str] = []
 
     # Parse bipolar labels
@@ -156,20 +170,30 @@ def prep_pairs(
     def _mid(col):
         a = pd.to_numeric(e1.get(col), errors="coerce").to_numpy()
         b = pd.to_numeric(e2.get(col), errors="coerce").to_numpy()
-        return (a + b) / 2.0
+        return pair_coordinate_axis(a, b)
 
     out = pd.DataFrame({"label": ch2["label"].astype("string").values})
     for axis in ("x", "y", "z"):
         c = f"{cml_key}.{axis}"
-        out[c] = _mid(c) if c in elec_idx.columns else pd.NA
+        if c in elec_idx.columns:
+            out_c = _mid(c)
+            # Pixels space (CML key "vox") stores integer voxel indices;
+            # neurorad floors pair midpoints to keep them on the grid.
+            if cml_key == "vox":
+                out_c = np.floor(out_c)
+            out[c] = out_c
+        else:
+            out[c] = pd.NA
 
     # type (underscore names match CML pairs schema: type_1/type_2)
-    if group_col:
-        out["type_1"] = e1[group_col].apply(_norm_group).to_numpy()
-        out["type_2"] = e2[group_col].apply(_norm_group).to_numpy()
-    else:
-        out["type_1"] = pd.NA
-        out["type_2"] = pd.NA
+    out["type_1"] = ch_bip['description'].apply(_norm_group).to_numpy()
+    out["type_2"] = ch_bip['description'].apply(_norm_group).to_numpy()
+    # if group_col:
+    #     out["type_1"] = e1[group_col].apply(_norm_group).to_numpy()
+    #     out["type_2"] = e2[group_col].apply(_norm_group).to_numpy()
+    # else:
+    #     out["type_1"] = pd.NA
+    #     out["type_2"] = pd.NA
 
     # (region columns intentionally omitted — see note above.)
     # contact_1 / contact_2 are also omitted: CML stores them as integer

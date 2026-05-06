@@ -10,7 +10,7 @@ from ..loaders.bids import load_bids_events
 from ..preparers.events import prep_events
 from ..preparers.fixes import apply_fixes
 from ..comparators.dataframe import DataFrameComparator
-
+import cmlreaders as cml
 
 class EventsPipeline(BasePipeline):
     """Compare CML vs BIDS behavioral events for one session."""
@@ -30,10 +30,19 @@ class EventsPipeline(BasePipeline):
     def _run(self) -> Dict[str, Any]:
         # Load CML events
         self._vprint(f"  Loading CML events...")
+        reader_cml = cml.CMLReader(
+            subject=self.subject,
+            experiment=self.experiment,
+            session=self.session,
+            localization=self.localization,
+            montage=self.montage,
+        )
         evs_cml = load_cml_events(
             self.subject, self.experiment, self.session,
             localization=self.localization, montage=self.montage,
         )
+        evs_cml = cml.correct_retrieval_offsets(evs_cml, reader_cml)  
+        evs_cml = cml.correct_countdown_lists(evs_cml, reader_cml)  
         self._vprint(f"  CML events loaded: {len(evs_cml)} rows, types={sorted(evs_cml['type'].dropna().unique())}")
 
         # Load BIDS events via BIDSReader
@@ -55,7 +64,7 @@ class EventsPipeline(BasePipeline):
         prep = prep_events(
             evs_cml, evs_bids,
             evs_types=self.evs_types,
-            onset_as_diff=True,
+            onset_as_diff=False,
             subject=self.subject,
             experiment=self.experiment,
             session=self.session,

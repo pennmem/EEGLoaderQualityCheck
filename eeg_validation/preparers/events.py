@@ -55,30 +55,42 @@ def prep_events(
     cml_f = evs_cml[evs_cml["type"].astype(str).isin(evs_types_used)].copy()
     bids_f = evs_bids[evs_bids["trial_type"].astype(str).isin(evs_types_used)].copy()
 
-    # Replace CML sentinels
-    cml2 = cml_f.replace({-999: np.nan, -999.0: np.nan, "-999": np.nan, "": np.nan}).copy()
-    bids2 = bids_f.copy()
+    # Replace sentinels on both sides so missing/placeholder values compare equal.
+    sentinels = {-999: np.nan, -999.0: np.nan, "-999": np.nan,
+                 "": np.nan, "n/a": np.nan, "N/A": np.nan, "X": np.nan}
+    cml2 = cml_f.replace(sentinels).copy()
+    bids2 = bids_f.replace(sentinels).copy()
 
     # Rename CML columns to BIDS schema
     cml2 = cml2.rename(columns={"eegoffset": "sample", "mstime": "onset", "type": "trial_type"})
 
     # Ensure comparable types
     cml2["sample"] = pd.to_numeric(cml2["sample"], errors="coerce")
-    print(cml2["sample"])
     bids2["sample"] = pd.to_numeric(bids2["sample"], errors="coerce")
     cml2["trial_type"] = cml2["trial_type"].astype(str)
     bids2["trial_type"] = bids2["trial_type"].astype(str)
 
-    # Onset conversion
+    # CML stores list-valued columns (e.g. `test`) as Python lists, while BIDS
+    # round-trips them through TSV as strings. Stringify list cells on the CML
+    # side so the two compare equal; preserve NaN.
+    for col in cml2.columns:
+        if cml2[col].apply(lambda v: isinstance(v, list)).any():
+            cml2[col] = cml2[col].apply(lambda v: str(v) if isinstance(v, list) else v)
+
+    # Onset conversion. Anchor the zero-point at the first event in the
+    # *unfiltered* frame so CML and BIDS share an absolute timeline even
+    # when evs_types drops the original first row.
     cml_onset_s = pd.to_numeric(cml_f["mstime"], errors="coerce") / 1000.0
     bids_onset_s = pd.to_numeric(bids2["onset"], errors="coerce")
+    cml_t0 = pd.to_numeric(evs_cml["mstime"], errors="coerce").iloc[0] / 1000.0
+    bids_t0 = pd.to_numeric(evs_bids["onset"], errors="coerce").iloc[0]
 
     if onset_as_diff:
         cml2["onset"] = cml_onset_s.diff()
         bids2["onset"] = bids_onset_s.diff()
     else:
-        cml2["onset"] = cml_onset_s - cml_onset_s.iloc[0]
-        bids2["onset"] = bids_onset_s
+        cml2["onset"] = cml_onset_s - cml_t0
+        bids2["onset"] = bids_onset_s - bids_t0
 
     # Attach metadata
     for df in (cml2, bids2):
@@ -93,6 +105,10 @@ def prep_events(
     if drop_cols:
         cml2 = cml2.drop(columns=[c for c in drop_cols if c in cml2.columns])
         bids2 = bids2.drop(columns=[c for c in drop_cols if c in bids2.columns])
+
+    # # Sort both sides by sample then trial_type so downstream alignment is stable.
+    # cml2 = cml2.sort_values(["sample", "trial_type"], kind="mergesort")
+    # bids2 = bids2.sort_values(["sample", "trial_type"], kind="mergesort")
 
     return {
         "evs_cml_prepped": cml2.reset_index(drop=True),

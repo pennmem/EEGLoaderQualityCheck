@@ -23,7 +23,26 @@ def load_cml_events(
         localization=localization,
         montage=montage,
     )
+    
     return reader.load("events")
+
+
+def _strip_yc_unhashable_cols(events: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """YC events carry list-of-dict columns (`path`, and `stim_params` for
+    YC2) that cmlreaders' to_ptsa() can't factorize into a MultiIndex —
+    its `tuple(list)` coercion leaves the inner dicts unhashable. Drop
+    them; the comparison pipeline only uses data/channel/time."""
+    if events is None:
+        return events
+    drop = []
+    for col in events.columns:
+        v = events[col].dropna()
+        if not len(v):
+            continue
+        x = v.iloc[0]
+        if isinstance(x, dict) or (isinstance(x, list) and x and isinstance(x[0], dict)):
+            drop.append(col)
+    return events.drop(columns=drop) if drop else events
 
 
 def load_cml_eeg_raw(
@@ -43,7 +62,10 @@ def load_cml_eeg_raw(
         localization=localization,
         montage=montage,
     )
-    return reader.load_eeg(scheme=scheme).to_ptsa()
+    container = reader.load_eeg(scheme=scheme)
+    if experiment.startswith("YC"):
+        container.events = _strip_yc_unhashable_cols(container.events)
+    return container.to_ptsa()
 
 
 def load_cml_eeg_epoched(
@@ -66,6 +88,8 @@ def load_cml_eeg_epoched(
         localization=localization,
         montage=montage,
     )
+    if experiment.startswith("YC"):
+        events = _strip_yc_unhashable_cols(events)
     return reader.load_eeg(events, scheme=scheme, rel_start=rel_start, rel_stop=rel_stop).to_ptsa()
 
 
