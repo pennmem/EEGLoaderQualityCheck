@@ -27,7 +27,10 @@ import numpy as np
 import pandas as pd
 
 from .base import BasePipeline
-from ..comparators.digital_signal import DigitalSignalComparator
+from ..comparators.digital_signal import (
+    DigitalSignalComparator,
+    _FORMAT_DIGITAL_RANGE,
+)
 from ..loaders.cml import load_cml_contacts_and_pairs
 
 
@@ -61,9 +64,18 @@ class DigitalSignalPipeline(BasePipeline):
     def _load_cml_digital(self, acquisition: str):
         """Load CML integer samples via CMLReader.
 
-        Returns ``("EDF", labels, [int64_array_per_channel])`` — the
-        format tag is ``"EDF"`` because CMLReader's native integers live
-        in the int16 (EDF) range for system 1/2 recordings.
+        Returns ``(fmt, labels, [int64_array_per_channel])`` where ``fmt``
+        is detected from the native digital range, so the comparator's
+        auto-scale picks the right factor for both recording types:
+
+        - System 1/2 iEEG is 16-bit, samples stay within the int16 range
+          (±32768) → tagged ``"EDF"`` → matches a BIDS EDF as ``(1, 1)``.
+        - Scalp BioSemi (e.g. LTP) is 24-bit, samples exceed the int16
+          range → tagged ``"BDF"`` → matches a BIDS BDF as ``(1, 1)``,
+          avoiding a spurious ×256 rescale.
+
+        A genuinely 24-bit iEEG recording (future System 3/4) adapts
+        automatically for the same reason.
         """
         reader = cml.CMLReader(
             subject=self.subject,
@@ -87,7 +99,11 @@ class DigitalSignalPipeline(BasePipeline):
         # CMLReader returns float64 but the values are integer LSBs.
         labels = list(eeg.channels)
         signals = [arr[i].astype(np.int64) for i in range(arr.shape[0])]
-        return "EDF", labels, signals
+        # Detect the native digital format from the sample range: a 16-bit
+        # recording cannot exceed the int16 range, a 24-bit one will.
+        peak = max((int(np.abs(s).max()) for s in signals if s.size), default=0)
+        fmt = "BDF" if peak > _FORMAT_DIGITAL_RANGE["EDF"] else "EDF"
+        return fmt, labels, signals
 
     def _bids_edf_bdf_path(self, acquisition: str) -> Optional[str]:
         """Resolve the BIDS EDF or BDF for the given acquisition."""
@@ -99,7 +115,8 @@ class DigitalSignalPipeline(BasePipeline):
         )
         if not os.path.isdir(ses_dir):
             return None
-        prefix = f"sub-{self.subject}_ses-{self.session}_task-{self.experiment}"
+        task = self.experiment if self.is_intracranial else self.experiment.lower()
+        prefix = f"sub-{self.subject}_ses-{self.session}_task-{task}"
         if self.is_intracranial:
             prefix += f"_acq-{acquisition}_ieeg"
         else:

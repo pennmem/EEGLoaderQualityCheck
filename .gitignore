@@ -11,3 +11,5 @@ ram_results
 ram_*
 ltp_*
 results/
+*.pyc
+__pycache__/
