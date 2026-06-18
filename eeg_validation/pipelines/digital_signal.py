@@ -30,7 +30,10 @@ from .base import BasePipeline
 from ..comparators.digital_signal import (
     DigitalSignalComparator,
     _FORMAT_DIGITAL_RANGE,
+    _read_edf_bdf_digital,
+    read_edf_bdf_units,
 )
+from ..digital_units import compute_gain_offset, dim_to_si_scale
 from ..loaders.cml import load_cml_contacts_and_pairs
 
 
@@ -61,21 +64,32 @@ class DigitalSignalPipeline(BasePipeline):
     # ------------------------------------------------------------------
     # Loaders
     # ------------------------------------------------------------------
-    def _load_cml_digital(self, acquisition: str):
-        """Load CML integer samples via CMLReader.
+    def _load_cml_digital(self, acquisition: str, bids_path: Optional[str] = None):
+        """Load CML integer samples for comparison against the BIDS EDF/BDF.
 
-        Returns ``(fmt, labels, [int64_array_per_channel])`` where ``fmt``
-        is detected from the native digital range, so the comparator's
-        auto-scale picks the right factor for both recording types:
+        Two source regimes need different handling:
 
-        - System 1/2 iEEG is 16-bit, samples stay within the int16 range
-          (±32768) → tagged ``"EDF"`` → matches a BIDS EDF as ``(1, 1)``.
-        - Scalp BioSemi (e.g. LTP) is 24-bit, samples exceed the int16
-          range → tagged ``"BDF"`` → matches a BIDS BDF as ``(1, 1)``,
-          avoiding a spurious ×256 rescale.
+        - **iEEG (System 1/2):** ``CMLReader.load_eeg()`` returns the native
+          EDF integer LSBs as float64. We cast to int and tag the format from
+          the sample range — 16-bit data stays within ±32768 → ``"EDF"``;
+          genuinely 24-bit data → ``"BDF"`` (matching the BIDS container as
+          ``(1, 1)``, no spurious rescale).
 
-        A genuinely 24-bit iEEG recording (future System 3/4) adapts
-        automatically for the same reason.
+        - **Scalp, EGI ``.raw``/``.mff`` source:** ``load_eeg()`` returns
+          **physical Volts**, not integer LSBs (the EGI recording has no EDF
+          integers). A naive ``astype(int64)`` would floor every sample to 0.
+          Instead we *reconstruct* the digital ints by requantizing the CML
+          Volts with the **same per-channel gain/offset the BIDS BDF was
+          written with**, recovered from the BDF header
+          (``digital = round((µV - offset) / gain)``). The result is tagged
+          ``"BDF"`` so it compares against the BIDS BDF as ``(1, 1)``; any
+          residual diff is just requantization rounding (≤1 LSB).
+
+        - **Scalp, native ``.bdf``/``.edf`` source:** the recording already
+          *is* integer LSBs, and the BIDS file is a bit-exact copy of it
+          (``ScalpBIDSConverter._write_eeg_from_bdf``). Reconstructing from
+          MNE Volts would inject avoidable rounding, so we skip ``load_eeg()``
+          entirely and read the source EDF/BDF's integer samples directly.
         """
         reader = cml.CMLReader(
             subject=self.subject,
@@ -84,26 +98,89 @@ class DigitalSignalPipeline(BasePipeline):
             localization=self.localization,
             montage=self.montage,
         )
-        scheme = None
-        if self.is_intracranial:
-            contacts, pairs = load_cml_contacts_and_pairs(
-                self.subject, self.experiment, self.session,
-                self.localization, self.montage,
-            )
-            scheme = contacts if acquisition in ("monopolar", "contacts") else pairs
+        if not self.is_intracranial:
+            # Scalp: only EGI .raw/.mff need volts→ints reconstruction;
+            # native .bdf/.edf sources are already digital, so read them
+            # straight from disk to avoid requantization rounding.
+            data_format, source_path = self._cml_scalp_source(reader)
+            if data_format not in (".raw", ".mff"):
+                return _read_edf_bdf_digital(source_path)
+            eeg = reader.load_eeg()
+            arr = np.asarray(eeg.data)
+            if arr.ndim == 3:
+                arr = np.squeeze(arr, axis=0)
+            labels = list(eeg.channels)
+            return self._reconstruct_scalp_digital(arr, labels, bids_path)
+
+        contacts, pairs = load_cml_contacts_and_pairs(
+            self.subject, self.experiment, self.session,
+            self.localization, self.montage,
+        )
+        scheme = contacts if acquisition in ("monopolar", "contacts") else pairs
 
         eeg = reader.load_eeg(scheme=scheme)
         arr = np.asarray(eeg.data)
         if arr.ndim == 3:
             arr = np.squeeze(arr, axis=0)
-        # CMLReader returns float64 but the values are integer LSBs.
         labels = list(eeg.channels)
+
+        # iEEG: native integer LSBs returned as float64.
         signals = [arr[i].astype(np.int64) for i in range(arr.shape[0])]
         # Detect the native digital format from the sample range: a 16-bit
         # recording cannot exceed the int16 range, a 24-bit one will.
         peak = max((int(np.abs(s).max()) for s in signals if s.size), default=0)
         fmt = "BDF" if peak > _FORMAT_DIGITAL_RANGE["EDF"] else "EDF"
         return fmt, labels, signals
+
+    def _cml_scalp_source(self, reader):
+        """Return ``(data_format, source_path)`` for the scalp recording.
+
+        ``data_format`` is the source extension as recorded in ``sources.json``
+        (e.g. ``".bdf"``, ``".raw"``, ``".mff"``). ``source_path`` is the
+        on-disk recording in the sibling ``noreref/`` directory — the same file
+        ``CMLReader`` hands to MNE. Used to decide whether the digital samples
+        can be read directly (native EDF/BDF) or must be reconstructed (EGI).
+        """
+        from cmlreaders.path_finder import PathFinder
+
+        finder = PathFinder(
+            subject=self.subject,
+            experiment=self.experiment,
+            session=int(self.session),
+        )
+        sources_json = finder.find("sources")
+        df = pd.read_json(sources_json, orient="index")
+        data_format = str(df["data_format"].iloc[0])
+        basename = str(df.index[0])
+        source_path = os.path.join(
+            os.path.dirname(sources_json), "noreref", basename,
+        )
+        return data_format, source_path
+
+    def _reconstruct_scalp_digital(self, arr, labels, bids_path):
+        """Requantize CML Volts into the BIDS BDF digital domain.
+
+        Uses the target BDF header's per-channel ``physical/digital`` range to
+        recover ``gain, offset`` (``physical = digital*gain + offset``) and
+        inverts: ``digital = round((cml_µV - offset) / gain)``. Channels absent
+        from the BDF header are dropped (the comparator only uses common ones).
+        """
+        if bids_path is None:
+            raise ValueError("scalp digital reconstruction requires bids_path")
+        units = read_edf_bdf_units(bids_path)
+        out_labels = []
+        signals = []
+        for i, lbl in enumerate(labels):
+            if lbl not in units:
+                continue
+            pmin, pmax, dmin, dmax, dim = units[lbl]
+            gain, offset = compute_gain_offset(pmin, pmax, dmin, dmax)
+            # CML Volts → physical units of the BDF header (e.g. µV).
+            cml_phys = arr[i].astype(np.float64) / dim_to_si_scale(dim)
+            ints = np.round((cml_phys - offset) / gain).astype(np.int64)
+            out_labels.append(lbl)
+            signals.append(ints)
+        return "BDF", out_labels, signals
 
     def _bids_edf_bdf_path(self, acquisition: str) -> Optional[str]:
         """Resolve the BIDS EDF or BDF for the given acquisition."""
@@ -153,7 +230,7 @@ class DigitalSignalPipeline(BasePipeline):
 
             # --- CML side (via CMLReader) ---
             try:
-                cml_source = self._load_cml_digital(acq)
+                cml_source = self._load_cml_digital(acq, bids_path)
                 self._vprint(f"    CML loaded: {len(cml_source[1])} channels")
             except Exception as e:
                 self._vprint(f"    Skipped: CMLReader load failed: {e}")

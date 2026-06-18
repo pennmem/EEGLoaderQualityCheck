@@ -90,6 +90,41 @@ def _read_edf_bdf_digital(path: str):
     return fmt, labels, signals
 
 
+def read_edf_bdf_units(path: str) -> Dict[str, tuple]:
+    """Return ``{label: (pmin, pmax, dmin, dmax, dim)}`` from an EDF/BDF header.
+
+    Parses the per-signal calibration fields so callers can recover each
+    channel's gain/offset (``physical = digital*gain + offset``). Field
+    layout in the signal header (each field is ``n_signals`` records of the
+    given width): label@0 (16), transducer@16 (80), dimension@96 (8),
+    physical_min@104 (8), physical_max@112 (8), digital_min@120 (8),
+    digital_max@128 (8) — mirroring the offsets ``_read_edf_bdf_digital``
+    uses for samples_per_record.
+    """
+    with open(path, "rb") as f:
+        f.read(256)
+        # n_signals lives at byte 252:256 of the main header.
+        f.seek(252)
+        n_signals = int(f.read(4))
+        f.seek(256)
+        h2 = f.read(n_signals * 256)
+
+    def _field(off_records: int, width: int, i: int) -> str:
+        base = off_records * n_signals + i * width
+        return h2[base : base + width].decode("ascii", errors="replace").strip()
+
+    units: Dict[str, tuple] = {}
+    for i in range(n_signals):
+        label = _field(0, 16, i)
+        dim = _field(96, 8, i)
+        pmin = float(_field(104, 8, i))
+        pmax = float(_field(112, 8, i))
+        dmin = int(_field(120, 8, i))
+        dmax = int(_field(128, 8, i))
+        units[label] = (pmin, pmax, dmin, dmax, dim)
+    return units
+
+
 # Native digital range per format. Used to derive the auto-detected
 # A→B scale factor: ratio of B's range to A's range, rounded to the
 # nearest power of 2.

@@ -109,7 +109,19 @@ class BasePipeline(ABC):
 
     def cml_to_volts(self, eeg_cml):
         """Convert CMLReader integer LSBs to Volts via the writer's
-        per-channel cascade. See :func:`eeg_validation.digital_units.cml_to_volts`."""
+        per-channel cascade. See :func:`eeg_validation.digital_units.cml_to_volts`.
+
+        Scalp EEG only: ``cmlreaders`` returns scalp data already calibrated to
+        Volts (it applies the recording's per-channel gain — its output matches
+        ``mne.io.read_raw_egi`` exactly, and the BIDS file stores those same
+        Volts). The digital-units cascade is an *iEEG* routine that expects raw
+        integer LSBs; applying it to already-Volts scalp data double-scales by
+        the derived 1 µV/LSB gain (a 1e6 error). So for non-intracranial
+        sessions we pass the data through unchanged."""
+        if not self.is_intracranial:
+            eeg_cml.attrs["units_status"] = "cml_native_volts"
+            self._vprint("  cml_to_volts skipped (scalp: CMLReader already in Volts)")
+            return eeg_cml
         from ..digital_units import cml_to_volts as _cml_to_volts
         out = _cml_to_volts(
             eeg_cml,
