@@ -175,14 +175,23 @@ def _apply_correction(
     time_col: str,
     sample_col: Optional[str],
 ) -> pd.DataFrame:
-    """Apply ``t -> t * slope + offset`` to ``time_col`` and ``s -> s * slope`` to ``sample_col``.
+    """Apply the relative-time drift correction to host-clock event times.
 
-    Mirrors the notebook's ``correct_event_times`` plus the per-event eegoffset
-    rounding step from the example demo cell.
+    ``time_col`` (e.g. ``mstime``) is already on the host/EEG clock, so the fit's
+    constant ``offset`` (the ~9 h task<->host clock skew) is **not** added — doing
+    so would remap the timestamps ~9 h onto the task clock and blow up the derived
+    sample offsets. Instead anchor at the first finite event and apply only the
+    slope (drift): ``t -> t0 + slope*(t - t0)``. ``sample_col`` (e.g. ``eegoffset``)
+    is a sample index already anchored at the recording start, so ``s -> s*slope``.
+
+    (``offset`` is retained in the signature for call-site compatibility but is
+    intentionally unused.)
     """
     out = events.copy()
     if time_col in out.columns:
-        out[time_col] = pd.to_numeric(out[time_col], errors="coerce") * slope + offset
+        t = pd.to_numeric(out[time_col], errors="coerce")
+        t0 = t[t.notna()].iloc[0] if t.notna().any() else np.nan
+        out[time_col] = t0 + slope * (t - t0)
     if sample_col is not None and sample_col in out.columns:
         original_dtype = events[sample_col].dtype
         scaled = pd.to_numeric(out[sample_col], errors="coerce") * slope

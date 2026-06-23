@@ -175,16 +175,25 @@ class HeartbeatDelaysPipeline(BasePipeline):
             .to_numpy(dtype=float)
         )
 
-        # Apply the heartbeat fit to predict the BIDS-side values.
-        eegoffset_pred = eegoffset_raw * slope
-        mstime_pred = mstime_raw * slope + offset_ms
+        # `mstime_raw`/`eegoffset_raw` are already on the host/EEG clock
+        # (eegoffset is samples since EEGSTART). The heartbeat fit is
+        # `time_host = slope*time_task + offset_ms`, so its constant `offset_ms`
+        # (the ~9 h task<->host skew) must be SUBTRACTED via the inverse fit, never
+        # added — adding it pushes mstime ~9 h onto the wrong clock and the derived
+        # eegoffset tens of millions of samples negative.
+        #
+        # eegoffset (samples) is slope-fitted; mstime is the continuous inverse fit
+        # onto the task clock, task = (host - offset_ms)/slope (no quantization,
+        # inter-event spacing scaled by 1/slope per the fit).
+        eegoffset_pred = np.round(slope * eegoffset_raw)
+        mstime_pred = (mstime_raw - offset_ms) / slope
 
         # Anchor both sides at the first matched event so the unknown
         # recording-start offset between absolute mstime and
         # BIDS-relative onset cancels out.
         valid = (
-            np.isfinite(eegoffset_raw)
-            & np.isfinite(mstime_raw)
+            np.isfinite(eegoffset_pred)
+            & np.isfinite(mstime_pred)
             & np.isfinite(sample_bids)
             & np.isfinite(onset_bids)
         )
